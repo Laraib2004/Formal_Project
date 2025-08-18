@@ -1,0 +1,31 @@
+recipe Pasta_with_tomato_sauce {
+
+    step1 {
+        get pot,
+        add water 1L to pot,
+        add salt 10g to pot,
+        cook water in pot 10min,
+        return pot;
+    }
+
+    step2 {
+        get pan,
+        add oil 20g to pan,
+        add garlic 1p to pan,
+        cook garlic in pan 2min,
+        add tomato 200g to pan,
+        cook tomato in pan 15min,
+        return pan;
+    }
+
+    step3 {
+        get pot,
+        add pasta 100g to pot,
+        boil pasta in pot 10min,
+        get colander,
+        drain pasta colander,
+        add pasta to pan,
+        mix pan,
+        serve Pasta_with_tomato_sauce;
+    }
+}
