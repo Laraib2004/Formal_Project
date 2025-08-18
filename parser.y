@@ -36,7 +36,7 @@ struct ast_node* new_node(ast_node_type type, char* value) {
     struct ast_node* node = (struct ast_node*)malloc(sizeof(struct ast_node));
     if (node) {
         node->type = type;
-        node->value = value ? strdup(value) : NULL; // Duplicate string
+        node->value = value ? strdup(value) : NULL;
         node->child = NULL;
         node->sibling = NULL;
     }
@@ -52,6 +52,59 @@ struct ast_node* add_sibling(struct ast_node* current, struct ast_node* sibling)
     }
     temp->sibling = sibling;
     return current;
+}
+
+
+// === SYMBOL TABLE DATA STRUCTURES ===
+typedef enum {
+    SYMBOL_INGREDIENT,
+    SYMBOL_TOOL
+} symbol_type;
+
+typedef struct symbol_entry {
+    char* name;
+    symbol_type type;
+    struct symbol_entry* next;
+} symbol_entry;
+
+// Simple linked list for the symbol table
+struct symbol_entry* symbol_table = NULL;
+
+// === FORWARD DECLARATION ===
+// This tells the compiler that lookup_symbol exists and what its signature is.
+struct symbol_entry* lookup_symbol(char* name);
+
+// Corrected function to insert a symbol into the table
+void insert_symbol(char* name, symbol_type type) {
+    if (lookup_symbol(name) != NULL) {
+        fprintf(stderr, "Warning: '%s' is being added again. Symbol table already contains it.\n", name);
+        return;
+    }
+    
+    struct symbol_entry* new_entry = (struct symbol_entry*)malloc(sizeof(struct symbol_entry));
+    if (!new_entry) {
+        fprintf(stderr, "Error: Could not allocate memory for symbol.\n");
+        return;
+    }
+    new_entry->name = strdup(name);
+    new_entry->type = type;
+    new_entry->next = symbol_table;
+    symbol_table = new_entry;
+    printf("Symbol Table: Added '%s' as a ", name);
+    if (type == SYMBOL_TOOL) printf("TOOL.\n");
+    else if (type == SYMBOL_INGREDIENT) printf("INGREDIENT.\n");
+}
+
+// Function to look up a symbol in the table
+struct symbol_entry* lookup_symbol(char* name) {
+    struct symbol_entry* current = symbol_table;
+    while (current != NULL) {
+        if (strcmp(current->name, name) == 0) {
+            return current;
+        }
+        current = current->next;
+    }
+    return NULL;
 }
 %}
 
@@ -80,7 +133,7 @@ struct ast_node* add_sibling(struct ast_node* current, struct ast_node* sibling)
 /* Grammar rules with semantic actions */
 
 program:
-    recipe_declaration { 
+    recipe_declaration {
         ast_root = new_node(NODE_PROGRAM, NULL);
         ast_root->child = $1;
     }
@@ -88,6 +141,7 @@ program:
 
 recipe_declaration:
     RECIPE IDENTIFIER LBRACE step_list RBRACE {
+        // Here you could also insert the recipe name into the symbol table
         ast_node* id_node = new_node(NODE_IDENTIFIER, $2);
         ast_node* recipe_node = new_node(NODE_RECIPE, "recipe");
         recipe_node->child = add_sibling(id_node, $4);
@@ -117,11 +171,15 @@ action_list:
 
 action:
     GET IDENTIFIER {
+        // Semantic action: Add the identifier to the symbol table as a TOOL
+        insert_symbol($2, SYMBOL_TOOL);
         ast_node* get_node = new_node(NODE_ACTION, "get");
         get_node->child = new_node(NODE_IDENTIFIER, $2);
         $$ = get_node;
     }
     | ADD IDENTIFIER INTEGER_LITERAL G_UNIT TO IDENTIFIER {
+        // Semantic action: Add the identifier to the symbol table as an INGREDIENT
+        insert_symbol($2, SYMBOL_INGREDIENT);
         ast_node* add_node = new_node(NODE_ACTION, "add");
         char num_str[16];
         sprintf(num_str, "%d", $3);
@@ -132,6 +190,8 @@ action:
         $$ = add_node;
     }
     | ADD IDENTIFIER INTEGER_LITERAL L_UNIT TO IDENTIFIER {
+        // Semantic action: Add the identifier to the symbol table as an INGREDIENT
+        insert_symbol($2, SYMBOL_INGREDIENT);
         ast_node* add_node = new_node(NODE_ACTION, "add");
         char num_str[16];
         sprintf(num_str, "%d", $3);
@@ -142,16 +202,20 @@ action:
         $$ = add_node;
     }
     | ADD IDENTIFIER INTEGER_LITERAL P_UNIT TO IDENTIFIER {
+        // Semantic action: Add the identifier to the symbol table as an INGREDIENT
+        insert_symbol($2, SYMBOL_INGREDIENT);
         ast_node* add_node = new_node(NODE_ACTION, "add");
         char num_str[16];
         sprintf(num_str, "%d", $3);
-        add_node->child = new_node(NODE_IDENTIFIER, num_str);
+        add_node->child = new_node(NODE_IDENTIFIER, $2);
         add_node->child->sibling = new_node(NODE_INTEGER, num_str);
         add_node->child->sibling->sibling = new_node(NODE_UNIT, "p");
         add_node->child->sibling->sibling->sibling = new_node(NODE_IDENTIFIER, $6);
         $$ = add_node;
     }
     | ADD IDENTIFIER TO IDENTIFIER {
+        // Semantic action: Add the identifier to the symbol table as an INGREDIENT
+        insert_symbol($2, SYMBOL_INGREDIENT);
         ast_node* add_node = new_node(NODE_ACTION, "add");
         add_node->child = new_node(NODE_IDENTIFIER, $2);
         add_node->child->sibling = new_node(NODE_IDENTIFIER, $4);
@@ -246,6 +310,9 @@ int main(int argc, char **argv) {
         }
         yyin = file;
     }
+
+    // Initialize the symbol table
+    symbol_table = NULL;
 
     int result = yyparse();
     
