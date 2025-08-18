@@ -1,6 +1,8 @@
 %{
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+#include "parser.tab.h"
 
 // Function to handle string attributes.
 char* my_strdup(const char* s) {
@@ -34,7 +36,6 @@ char* my_strdup(const char* s) {
 "{"             { return LBRACE; }
 "}"             { return RBRACE; }
 ";"             { return SEMICOLON; }
-","             { return COMMA; }
 
 [a-zA-Z_][a-zA-Z0-9_]* {
     yylval.string_val = my_strdup(yytext);

@@ -12,7 +12,7 @@ PARSER_H = parser.tab.h
 
 # Define compiler and flags
 CC = gcc
-CFLAGS = -Wall -std=c99
+CFLAGS = -Wall -std=gnu99
 
 # The default target that builds the compiler
 all: $(TARGET)
@@ -23,10 +23,11 @@ $(TARGET): $(LEXER_C) $(PARSER_C)
 
 # Rule to generate the parser C and H files from the bison source
 $(PARSER_C) $(PARSER_H): $(BISON_SOURCE)
-	bison -d $(BISON_SOURCE)
+	bison -d -v $(BISON_SOURCE)
 
 # Rule to generate the lexer C file from the flex source
-$(LEXER_C): $(FLEX_SOURCE)
+# This is the line that was updated!
+$(LEXER_C): $(FLEX_SOURCE) $(PARSER_H)
 	flex $(FLEX_SOURCE)
 
 # Clean up generated files
