@@ -6,8 +6,11 @@
 extern int yylex();
 extern FILE *yyin;
 
+extern int yylineno;
+extern char* yytext;
+
 void yyerror(const char *s) {
-    fprintf(stderr, "Syntax error: %s\n", s);
+    fprintf(stderr, "Syntax error at line %d near '%s': %s\n", yylineno, yytext, s);
 }
 
 // === AST DATA STRUCTURES ===
@@ -120,7 +123,7 @@ struct symbol_entry* lookup_symbol(char* name) {
 void insert_symbol(char* name, symbol_type type) {
     if (!scope_stack) enter_scope(); // ensure a scope exists
     if (lookup_symbol(name)) {
-        fprintf(stderr, "Errore: simbolo '%s' già dichiarato in scope visibile.\n", name);
+        fprintf(stderr, "Error: symbol '%s' already declared in visible scope.\n", name);
         return;
     }
     symbol_entry* new_entry = malloc(sizeof(symbol_entry));
@@ -172,7 +175,7 @@ void execute_assignment(ast_node* node) {
         entry->value = strdup(value_node->value);
         printf("        * Set variable '%s' to '%s'\n", entry->name, entry->value);
     } else {
-        fprintf(stderr, "Errore: variabile '%s' non dichiarata\n", variable_node->value);
+        fprintf(stderr, "Error: variable '%s' not declared\n", variable_node->value);
     }
 }
 
@@ -252,7 +255,7 @@ void execute_program(ast_node* node) {
 }
 %}
 
-/* resto del file invariato: union, tokens, grammar, print_ast, main */
+/* rest of the file unchanged: union, tokens, grammar, print_ast, main */
 
 
 // === UNION & TOKENS ===
