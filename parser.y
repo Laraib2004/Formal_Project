@@ -106,6 +106,93 @@ struct symbol_entry* lookup_symbol(char* name) {
     }
     return NULL;
 }
+
+// === INTERPRETER FUNCTIONS ===
+// Forward declarations for the interpreter functions
+void execute_action(ast_node* node);
+void execute_step(ast_node* node);
+void execute_recipe(ast_node* node);
+void execute_program(ast_node* node);
+
+
+void execute_action(ast_node* node) {
+    if (!node || node->type != NODE_ACTION) return;
+
+    printf("    -> Action: %s\n", node->value);
+    
+    if (strcmp(node->value, "get") == 0) {
+        printf("       * Getting %s\n", node->child->value);
+    } else if (strcmp(node->value, "add") == 0) {
+        ast_node* arg1 = node->child;
+        ast_node* arg2 = arg1->sibling;
+        
+        if (arg2->type == NODE_INTEGER) { // has quantity: add INGREDIENT INT UNIT TO TOOL
+            ast_node* arg3 = arg2->sibling;
+            ast_node* arg4 = arg3->sibling;
+            printf("       * Adding %s %s of %s to %s\n", arg2->value, arg3->value, arg1->value, arg4->value);
+        } else { // no quantity: add INGREDIENT TO TOOL
+            printf("       * Adding %s to %s\n", arg1->value, arg2->value);
+        }
+
+    } else if (strcmp(node->value, "cook") == 0) {
+        ast_node* arg1 = node->child;
+        ast_node* arg2 = arg1->sibling;
+        ast_node* arg3 = arg2->sibling;
+        ast_node* arg4 = arg3->sibling;
+        printf("       * Cooking %s in %s for %s %s\n", arg1->value, arg2->value, arg3->value, arg4->value);
+
+    } else if (strcmp(node->value, "return") == 0) {
+        printf("       * Returning %s\n", node->child->value);
+
+    } else if (strcmp(node->value, "boil") == 0) {
+        ast_node* arg1 = node->child;
+        ast_node* arg2 = arg1->sibling;
+        ast_node* arg3 = arg2->sibling;
+        ast_node* arg4 = arg3->sibling;
+        printf("       * Boiling %s in %s for %s %s\n", arg1->value, arg2->value, arg3->value, arg4->value);
+
+    } else if (strcmp(node->value, "drain") == 0) {
+        ast_node* arg1 = node->child;
+        ast_node* arg2 = arg1->sibling;
+        printf("       * Draining %s using %s\n", arg1->value, arg2->value);
+
+    } else if (strcmp(node->value, "mix") == 0) {
+        printf("       * Mixing %s\n", node->child->value);
+    } else if (strcmp(node->value, "serve") == 0) {
+        printf("       * Serving the dish: %s\n", node->child->value);
+    }
+}
+
+void execute_step(ast_node* node) {
+    if (!node || node->type != NODE_STEP) return;
+    
+    printf("  --- Executing Step %s ---\n", node->value);
+    
+    ast_node* current_action = node->child;
+    while(current_action != NULL) {
+        execute_action(current_action);
+        current_action = current_action->sibling;
+    }
+}
+
+void execute_recipe(ast_node* node) {
+    if (!node || node->type != NODE_RECIPE) return;
+
+    // The first child is the IDENTIFIER, the second is the step list
+    printf("--- Executing Recipe: %s ---\n", node->child->value);
+    
+    ast_node* current_step = node->child->sibling;
+    while(current_step != NULL) {
+        execute_step(current_step);
+        current_step = current_step->sibling;
+    }
+}
+
+void execute_program(ast_node* node) {
+    if (!node || node->type != NODE_PROGRAM) return;
+
+    execute_recipe(node->child);
+}
 %}
 
 // === UNION & TOKENS ===
@@ -319,8 +406,13 @@ int main(int argc, char **argv) {
     if (result == 0) {
         printf("Parsing successful!\n");
         printf("--- AST ---\n");
-        print_ast(ast_root, 0); // Correctly calls print on the global AST root
+        print_ast(ast_root, 0);
         printf("-----------\n");
+
+        printf("\n--- INTERPRETER OUTPUT ---\n");
+        execute_program(ast_root);
+        printf("--------------------------\n");
+
     } else {
         printf("Parsing failed.\n");
     }
