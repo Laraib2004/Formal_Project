@@ -23,7 +23,7 @@ $(TARGET): $(LEXER_C) $(PARSER_C)
 
 # Rule to generate the parser C and H files from the bison source
 $(PARSER_C) $(PARSER_H): $(BISON_SOURCE)
-	bison -d $(BISON_SOURCE)
+	bison -d -v $(BISON_SOURCE)
 
 # Rule to generate the lexer C file from the flex source
 # This is the line that was updated!

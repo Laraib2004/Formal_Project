@@ -18,7 +18,11 @@ typedef enum {
     NODE_ACTION,
     NODE_IDENTIFIER,
     NODE_INTEGER,
-    NODE_UNIT
+    NODE_UNIT,
+    NODE_IF,
+    NODE_ASSIGNMENT,
+    NODE_STRING,
+    NODE_CONDITION // New node type for the condition
 } ast_node_type;
 
 typedef struct ast_node {
@@ -58,12 +62,14 @@ struct ast_node* add_sibling(struct ast_node* current, struct ast_node* sibling)
 // === SYMBOL TABLE DATA STRUCTURES ===
 typedef enum {
     SYMBOL_INGREDIENT,
-    SYMBOL_TOOL
+    SYMBOL_TOOL,
+    SYMBOL_VARIABLE // A new type for variables
 } symbol_type;
 
 typedef struct symbol_entry {
     char* name;
     symbol_type type;
+    char* value; // Storing the value for interpreter
     struct symbol_entry* next;
 } symbol_entry;
 
@@ -88,11 +94,13 @@ void insert_symbol(char* name, symbol_type type) {
     }
     new_entry->name = strdup(name);
     new_entry->type = type;
+    new_entry->value = NULL; // Initialize value
     new_entry->next = symbol_table;
     symbol_table = new_entry;
     printf("Symbol Table: Added '%s' as a ", name);
     if (type == SYMBOL_TOOL) printf("TOOL.\n");
     else if (type == SYMBOL_INGREDIENT) printf("INGREDIENT.\n");
+    else if (type == SYMBOL_VARIABLE) printf("VARIABLE.\n");
 }
 
 // Function to look up a symbol in the table
@@ -109,19 +117,51 @@ struct symbol_entry* lookup_symbol(char* name) {
 
 // === INTERPRETER FUNCTIONS ===
 // Forward declarations for the interpreter functions
-void execute_action(ast_node* node);
+void execute_if(ast_node* node);
+void execute_assignment(ast_node* node);
+void execute_action_node(ast_node* node);
+void execute_action_list(ast_node* node);
 void execute_step(ast_node* node);
 void execute_recipe(ast_node* node);
 void execute_program(ast_node* node);
 
+void execute_if(ast_node* node) {
+    printf("        * Executing IF statement...\n");
+    ast_node* condition_node = node->child;
+    ast_node* action_list = condition_node->sibling;
 
-void execute_action(ast_node* node) {
-    if (!node || node->type != NODE_ACTION) return;
+    // TODO: Implement actual conditional logic here
+    // This is just a placeholder for now
+    printf("        * Condition is: %s == %s\n", condition_node->child->value, condition_node->child->sibling->value);
 
-    printf("    -> Action: %s\n", node->value);
+    // Call the new helper function to execute the actions inside the 'if' block
+    execute_action_list(action_list); 
+}
+
+void execute_assignment(ast_node* node) {
+    ast_node* variable_node = node->child;
+    ast_node* value_node = variable_node->sibling;
+
+    printf("        * Executing SET statement...\n");
+
+    // Check if the variable exists in the symbol table, if not, add it
+    if (!lookup_symbol(variable_node->value)) {
+        insert_symbol(variable_node->value, SYMBOL_VARIABLE);
+    }
     
+    // Store the value
+    struct symbol_entry* entry = lookup_symbol(variable_node->value);
+    if (entry) {
+        if (entry->value) free(entry->value);
+        entry->value = strdup(value_node->value);
+        printf("        * Set variable '%s' to '%s'\n", entry->name, entry->value);
+    }
+}
+
+
+void execute_action_node(ast_node* node) {
     if (strcmp(node->value, "get") == 0) {
-        printf("       * Getting %s\n", node->child->value);
+        printf("        * Getting %s\n", node->child->value);
     } else if (strcmp(node->value, "add") == 0) {
         ast_node* arg1 = node->child;
         ast_node* arg2 = arg1->sibling;
@@ -129,9 +169,9 @@ void execute_action(ast_node* node) {
         if (arg2->type == NODE_INTEGER) { // has quantity: add INGREDIENT INT UNIT TO TOOL
             ast_node* arg3 = arg2->sibling;
             ast_node* arg4 = arg3->sibling;
-            printf("       * Adding %s %s of %s to %s\n", arg2->value, arg3->value, arg1->value, arg4->value);
+            printf("        * Adding %s %s of %s to %s\n", arg2->value, arg3->value, arg1->value, arg4->value);
         } else { // no quantity: add INGREDIENT TO TOOL
-            printf("       * Adding %s to %s\n", arg1->value, arg2->value);
+            printf("        * Adding %s to %s\n", arg1->value, arg2->value);
         }
 
     } else if (strcmp(node->value, "cook") == 0) {
@@ -139,40 +179,49 @@ void execute_action(ast_node* node) {
         ast_node* arg2 = arg1->sibling;
         ast_node* arg3 = arg2->sibling;
         ast_node* arg4 = arg3->sibling;
-        printf("       * Cooking %s in %s for %s %s\n", arg1->value, arg2->value, arg3->value, arg4->value);
-
+        printf("        * Cooking %s in %s for %s %s\n", arg1->value, arg2->value, arg3->value, arg4->value);
     } else if (strcmp(node->value, "return") == 0) {
-        printf("       * Returning %s\n", node->child->value);
-
+        printf("        * Returning %s\n", node->child->value);
     } else if (strcmp(node->value, "boil") == 0) {
         ast_node* arg1 = node->child;
         ast_node* arg2 = arg1->sibling;
         ast_node* arg3 = arg2->sibling;
         ast_node* arg4 = arg3->sibling;
-        printf("       * Boiling %s in %s for %s %s\n", arg1->value, arg2->value, arg3->value, arg4->value);
-
+        printf("        * Boiling %s in %s for %s %s\n", arg1->value, arg2->value, arg3->value, arg4->value);
     } else if (strcmp(node->value, "drain") == 0) {
         ast_node* arg1 = node->child;
         ast_node* arg2 = arg1->sibling;
-        printf("       * Draining %s using %s\n", arg1->value, arg2->value);
-
+        printf("        * Draining %s using %s\n", arg1->value, arg2->value);
     } else if (strcmp(node->value, "mix") == 0) {
-        printf("       * Mixing %s\n", node->child->value);
+        printf("        * Mixing %s\n", node->child->value);
     } else if (strcmp(node->value, "serve") == 0) {
-        printf("       * Serving the dish: %s\n", node->child->value);
+        printf("        * Serving the dish: %s\n", node->child->value);
     }
 }
 
+// New function to execute a list of actions (e.g., inside an 'if' block)
+void execute_action_list(ast_node* node) {
+    ast_node* current_action = node;
+    while(current_action != NULL) {
+        if (current_action->type == NODE_ACTION) {
+            execute_action_node(current_action);
+        } else if (current_action->type == NODE_ASSIGNMENT) {
+            execute_assignment(current_action);
+        } else if (current_action->type == NODE_IF) {
+            execute_if(current_action);
+        }
+        current_action = current_action->sibling;
+    }
+}
+
+// execute_step now acts as a dispatcher
 void execute_step(ast_node* node) {
     if (!node || node->type != NODE_STEP) return;
     
     printf("  --- Executing Step %s ---\n", node->value);
     
-    ast_node* current_action = node->child;
-    while(current_action != NULL) {
-        execute_action(current_action);
-        current_action = current_action->sibling;
-    }
+    // Call the new helper function to execute the actions within the step
+    execute_action_list(node->child);
 }
 
 void execute_recipe(ast_node* node) {
@@ -203,17 +252,19 @@ void execute_program(ast_node* node) {
     struct ast_node* node_ptr;
 }
 
-%token <string_val> IDENTIFIER
+%token <string_val> IDENTIFIER STRING_LITERAL
 %token <int_val> INTEGER_LITERAL
 %token <double_val> FLOAT_LITERAL
 %token RECIPE STEP GET ADD TO COOK IN RETURN BOIL DRAIN MIX SERVE
 %token L_UNIT G_UNIT P_UNIT MIN_UNIT
 %token LBRACE RBRACE SEMICOLON
+%token IF LPAREN RPAREN EQ_OP
+%token SET ASSIGN
 
 %start program
 
 // === AST NODE TYPES FOR GRAMMAR RULES ===
-%type <node_ptr> program recipe_declaration step_list step_declaration action_list action
+%type <node_ptr> program recipe_declaration step_list step_declaration action_list action if_statement condition assignment 
 
 %%
 
@@ -228,7 +279,6 @@ program:
 
 recipe_declaration:
     RECIPE IDENTIFIER LBRACE step_list RBRACE {
-        // Here you could also insert the recipe name into the symbol table
         ast_node* id_node = new_node(NODE_IDENTIFIER, $2);
         ast_node* recipe_node = new_node(NODE_RECIPE, "recipe");
         recipe_node->child = add_sibling(id_node, $4);
@@ -251,6 +301,61 @@ step_declaration:
     }
     ;
 
+if_statement:
+    IF LPAREN condition RPAREN LBRACE action_list RBRACE {
+        ast_node* if_node = new_node(NODE_IF, "if");
+        if_node->child = $3; // The condition node
+        if_node->child->sibling = $6; // The action list
+        $$ = if_node;
+    }
+    ;
+
+condition:
+    IDENTIFIER EQ_OP IDENTIFIER {
+        ast_node* condition_node = new_node(NODE_CONDITION, "condition");
+        condition_node->child = new_node(NODE_IDENTIFIER, $1);
+        condition_node->child->sibling = new_node(NODE_IDENTIFIER, $3);
+        $$ = condition_node;
+    }
+    | IDENTIFIER EQ_OP INTEGER_LITERAL {
+        ast_node* condition_node = new_node(NODE_CONDITION, "condition");
+        condition_node->child = new_node(NODE_IDENTIFIER, $1);
+        char num_str[16];
+        sprintf(num_str, "%d", $3);
+        condition_node->child->sibling = new_node(NODE_INTEGER, num_str);
+        $$ = condition_node;
+    }
+    | IDENTIFIER EQ_OP STRING_LITERAL {
+        ast_node* condition_node = new_node(NODE_CONDITION, "condition");
+        condition_node->child = new_node(NODE_IDENTIFIER, $1);
+        condition_node->child->sibling = new_node(NODE_STRING, $3);
+        $$ = condition_node;
+    }
+    ;
+
+assignment:
+    SET IDENTIFIER ASSIGN IDENTIFIER {
+        ast_node* assign_node = new_node(NODE_ASSIGNMENT, "assignment");
+        assign_node->child = new_node(NODE_IDENTIFIER, $2);
+        assign_node->child->sibling = new_node(NODE_IDENTIFIER, $4);
+        $$ = assign_node;
+    }
+    | SET IDENTIFIER ASSIGN INTEGER_LITERAL {
+        ast_node* assign_node = new_node(NODE_ASSIGNMENT, "assignment");
+        assign_node->child = new_node(NODE_IDENTIFIER, $2);
+        char num_str[16];
+        sprintf(num_str, "%d", $4);
+        assign_node->child->sibling = new_node(NODE_INTEGER, num_str);
+        $$ = assign_node;
+    }
+    | SET IDENTIFIER ASSIGN STRING_LITERAL {
+        ast_node* assign_node = new_node(NODE_ASSIGNMENT, "assignment");
+        assign_node->child = new_node(NODE_IDENTIFIER, $2);
+        assign_node->child->sibling = new_node(NODE_STRING, $4);
+        $$ = assign_node;
+    }
+    ;
+
 action_list:
     action SEMICOLON { $$ = $1; }
     | action_list action SEMICOLON { $$ = add_sibling($1, $2); }
@@ -258,14 +363,12 @@ action_list:
 
 action:
     GET IDENTIFIER {
-        // Semantic action: Add the identifier to the symbol table as a TOOL
         insert_symbol($2, SYMBOL_TOOL);
         ast_node* get_node = new_node(NODE_ACTION, "get");
         get_node->child = new_node(NODE_IDENTIFIER, $2);
         $$ = get_node;
     }
     | ADD IDENTIFIER INTEGER_LITERAL G_UNIT TO IDENTIFIER {
-        // Semantic action: Add the identifier to the symbol table as an INGREDIENT
         insert_symbol($2, SYMBOL_INGREDIENT);
         ast_node* add_node = new_node(NODE_ACTION, "add");
         char num_str[16];
@@ -277,7 +380,6 @@ action:
         $$ = add_node;
     }
     | ADD IDENTIFIER INTEGER_LITERAL L_UNIT TO IDENTIFIER {
-        // Semantic action: Add the identifier to the symbol table as an INGREDIENT
         insert_symbol($2, SYMBOL_INGREDIENT);
         ast_node* add_node = new_node(NODE_ACTION, "add");
         char num_str[16];
@@ -289,7 +391,6 @@ action:
         $$ = add_node;
     }
     | ADD IDENTIFIER INTEGER_LITERAL P_UNIT TO IDENTIFIER {
-        // Semantic action: Add the identifier to the symbol table as an INGREDIENT
         insert_symbol($2, SYMBOL_INGREDIENT);
         ast_node* add_node = new_node(NODE_ACTION, "add");
         char num_str[16];
@@ -301,7 +402,6 @@ action:
         $$ = add_node;
     }
     | ADD IDENTIFIER TO IDENTIFIER {
-        // Semantic action: Add the identifier to the symbol table as an INGREDIENT
         insert_symbol($2, SYMBOL_INGREDIENT);
         ast_node* add_node = new_node(NODE_ACTION, "add");
         add_node->child = new_node(NODE_IDENTIFIER, $2);
@@ -349,6 +449,8 @@ action:
         serve_node->child = new_node(NODE_IDENTIFIER, $2);
         $$ = serve_node;
     }
+    | assignment
+    | if_statement
     ;
 
 %%
@@ -363,14 +465,18 @@ void print_ast(struct ast_node* node, int level) {
 
     const char* type_str;
     switch(node->type) {
-        case NODE_PROGRAM:    type_str = "PROGRAM"; break;
-        case NODE_RECIPE:     type_str = "RECIPE"; break;
-        case NODE_STEP:       type_str = "STEP"; break;
-        case NODE_ACTION:     type_str = "ACTION"; break;
-        case NODE_IDENTIFIER: type_str = "IDENTIFIER"; break;
-        case NODE_INTEGER:    type_str = "INTEGER"; break;
-        case NODE_UNIT:       type_str = "UNIT"; break;
-        default:              type_str = "UNKNOWN"; break;
+        case NODE_PROGRAM:      type_str = "PROGRAM"; break;
+        case NODE_RECIPE:       type_str = "RECIPE"; break;
+        case NODE_STEP:         type_str = "STEP"; break;
+        case NODE_ACTION:       type_str = "ACTION"; break;
+        case NODE_IDENTIFIER:   type_str = "IDENTIFIER"; break;
+        case NODE_INTEGER:      type_str = "INTEGER"; break;
+        case NODE_UNIT:         type_str = "UNIT"; break;
+        case NODE_IF:           type_str = "IF"; break;
+        case NODE_ASSIGNMENT:   type_str = "ASSIGNMENT"; break;
+        case NODE_STRING:       type_str = "STRING"; break;
+        case NODE_CONDITION:    type_str = "CONDITION"; break;
+        default:                type_str = "UNKNOWN"; break;
     }
 
     printf("%s", type_str);

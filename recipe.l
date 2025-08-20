@@ -28,6 +28,8 @@ char* my_strdup(const char* s) {
 "drain"         { return DRAIN; }
 "mix"           { return MIX; }
 "serve"         { return SERVE; }
+"if"            { return IF; }
+"set"           { return SET; }
 "L"             { return L_UNIT; }
 "g"             { return G_UNIT; }
 "p"             { return P_UNIT; }
@@ -36,6 +38,10 @@ char* my_strdup(const char* s) {
 "{"             { return LBRACE; }
 "}"             { return RBRACE; }
 ";"             { return SEMICOLON; }
+"("             { return LPAREN; }
+")"             { return RPAREN; }
+"=="            { return EQ_OP; }
+"="             { return ASSIGN; }
 
 [a-zA-Z_][a-zA-Z0-9_]* {
     yylval.string_val = my_strdup(yytext);
@@ -50,6 +56,13 @@ char* my_strdup(const char* s) {
 [0-9]+"."?[0-9]* {
     yylval.double_val = atof(yytext);
     return FLOAT_LITERAL;
+}
+
+"//"([^\n])* { /* ignore single-line comments */ }
+
+\"[^\"]*\" {
+    yylval.string_val = my_strdup(yytext);
+    return STRING_LITERAL;
 }
 
 [ \t\n]+        { /* ignore whitespace */ }
