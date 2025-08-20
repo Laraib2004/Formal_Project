@@ -1,0 +1,9 @@
+recipe Pasta {
+  step 1 {
+    set x = 10;
+    if (x == 10) {
+      set y = 20;
+    }
+    y = 5;   // ERRORE: y non visibile qui
+  }
+}

@@ -22,7 +22,7 @@ typedef enum {
     NODE_IF,
     NODE_ASSIGNMENT,
     NODE_STRING,
-    NODE_CONDITION // New node type for the condition
+    NODE_CONDITION
 } ast_node_type;
 
 typedef struct ast_node {
@@ -58,65 +58,84 @@ struct ast_node* add_sibling(struct ast_node* current, struct ast_node* sibling)
     return current;
 }
 
-
-// === SYMBOL TABLE DATA STRUCTURES ===
+// === SYMBOL TABLE WITH SCOPES ===
 typedef enum {
     SYMBOL_INGREDIENT,
     SYMBOL_TOOL,
-    SYMBOL_VARIABLE // A new type for variables
+    SYMBOL_VARIABLE
 } symbol_type;
 
 typedef struct symbol_entry {
     char* name;
     symbol_type type;
-    char* value; // Storing the value for interpreter
+    char* value;
     struct symbol_entry* next;
 } symbol_entry;
 
-// Simple linked list for the symbol table
-struct symbol_entry* symbol_table = NULL;
+typedef struct scope {
+    struct symbol_entry* symbols;
+    struct scope* next;
+} scope;
 
-// === FORWARD DECLARATION ===
-// This tells the compiler that lookup_symbol exists and what its signature is.
-struct symbol_entry* lookup_symbol(char* name);
+scope* scope_stack = NULL;
 
-// Corrected function to insert a symbol into the table
+// Scope management
+void enter_scope() {
+    scope* new_scope = malloc(sizeof(scope));
+    new_scope->symbols = NULL;
+    new_scope->next = scope_stack;
+    scope_stack = new_scope;
+    printf(">>> Entering new scope\n");
+}
+
+void exit_scope() {
+    if (!scope_stack) return;
+    scope* old = scope_stack;
+    scope_stack = scope_stack->next;
+
+    // Free symbols
+    symbol_entry* e = old->symbols;
+    while (e) {
+        symbol_entry* tmp = e;
+        e = e->next;
+        free(tmp->name);
+        if (tmp->value) free(tmp->value);
+        free(tmp);
+    }
+    free(old);
+    printf("<<< Exiting scope\n");
+}
+
+struct symbol_entry* lookup_symbol(char* name) {
+    for (scope* s = scope_stack; s; s = s->next) {
+        for (symbol_entry* e = s->symbols; e; e = e->next) {
+            if (strcmp(e->name, name) == 0) {
+                return e;
+            }
+        }
+    }
+    return NULL;
+}
+
 void insert_symbol(char* name, symbol_type type) {
-    if (lookup_symbol(name) != NULL) {
-        fprintf(stderr, "Warning: '%s' is being added again. Symbol table already contains it.\n", name);
+    if (!scope_stack) enter_scope(); // ensure a scope exists
+    if (lookup_symbol(name)) {
+        fprintf(stderr, "Errore: simbolo '%s' già dichiarato in scope visibile.\n", name);
         return;
     }
-    
-    struct symbol_entry* new_entry = (struct symbol_entry*)malloc(sizeof(struct symbol_entry));
-    if (!new_entry) {
-        fprintf(stderr, "Error: Could not allocate memory for symbol.\n");
-        return;
-    }
+    symbol_entry* new_entry = malloc(sizeof(symbol_entry));
     new_entry->name = strdup(name);
     new_entry->type = type;
-    new_entry->value = NULL; // Initialize value
-    new_entry->next = symbol_table;
-    symbol_table = new_entry;
-    printf("Symbol Table: Added '%s' as a ", name);
+    new_entry->value = NULL;
+    new_entry->next = scope_stack->symbols;
+    scope_stack->symbols = new_entry;
+    printf("Symbol Table: Added '%s' as ", name);
     if (type == SYMBOL_TOOL) printf("TOOL.\n");
     else if (type == SYMBOL_INGREDIENT) printf("INGREDIENT.\n");
     else if (type == SYMBOL_VARIABLE) printf("VARIABLE.\n");
 }
 
-// Function to look up a symbol in the table
-struct symbol_entry* lookup_symbol(char* name) {
-    struct symbol_entry* current = symbol_table;
-    while (current != NULL) {
-        if (strcmp(current->name, name) == 0) {
-            return current;
-        }
-        current = current->next;
-    }
-    return NULL;
-}
-
-// === INTERPRETER FUNCTIONS ===
-// Forward declarations for the interpreter functions
+// === INTERPRETER FUNCTIONS (unchanged, except lookup/insert now use scoped table) ===
 void execute_if(ast_node* node);
 void execute_assignment(ast_node* node);
 void execute_action_node(ast_node* node);
@@ -130,12 +149,11 @@ void execute_if(ast_node* node) {
     ast_node* condition_node = node->child;
     ast_node* action_list = condition_node->sibling;
 
-    // TODO: Implement actual conditional logic here
-    // This is just a placeholder for now
     printf("        * Condition is: %s == %s\n", condition_node->child->value, condition_node->child->sibling->value);
 
-    // Call the new helper function to execute the actions inside the 'if' block
+    enter_scope();
     execute_action_list(action_list); 
+    exit_scope();
 }
 
 void execute_assignment(ast_node* node) {
@@ -144,20 +162,19 @@ void execute_assignment(ast_node* node) {
 
     printf("        * Executing SET statement...\n");
 
-    // Check if the variable exists in the symbol table, if not, add it
     if (!lookup_symbol(variable_node->value)) {
         insert_symbol(variable_node->value, SYMBOL_VARIABLE);
     }
     
-    // Store the value
     struct symbol_entry* entry = lookup_symbol(variable_node->value);
     if (entry) {
         if (entry->value) free(entry->value);
         entry->value = strdup(value_node->value);
         printf("        * Set variable '%s' to '%s'\n", entry->name, entry->value);
+    } else {
+        fprintf(stderr, "Errore: variabile '%s' non dichiarata\n", variable_node->value);
     }
 }
-
 
 void execute_action_node(ast_node* node) {
     if (strcmp(node->value, "get") == 0) {
@@ -165,15 +182,13 @@ void execute_action_node(ast_node* node) {
     } else if (strcmp(node->value, "add") == 0) {
         ast_node* arg1 = node->child;
         ast_node* arg2 = arg1->sibling;
-        
-        if (arg2->type == NODE_INTEGER) { // has quantity: add INGREDIENT INT UNIT TO TOOL
+        if (arg2->type == NODE_INTEGER) {
             ast_node* arg3 = arg2->sibling;
             ast_node* arg4 = arg3->sibling;
             printf("        * Adding %s %s of %s to %s\n", arg2->value, arg3->value, arg1->value, arg4->value);
-        } else { // no quantity: add INGREDIENT TO TOOL
+        } else {
             printf("        * Adding %s to %s\n", arg1->value, arg2->value);
         }
-
     } else if (strcmp(node->value, "cook") == 0) {
         ast_node* arg1 = node->child;
         ast_node* arg2 = arg1->sibling;
@@ -199,7 +214,6 @@ void execute_action_node(ast_node* node) {
     }
 }
 
-// New function to execute a list of actions (e.g., inside an 'if' block)
 void execute_action_list(ast_node* node) {
     ast_node* current_action = node;
     while(current_action != NULL) {
@@ -214,22 +228,17 @@ void execute_action_list(ast_node* node) {
     }
 }
 
-// execute_step now acts as a dispatcher
 void execute_step(ast_node* node) {
     if (!node || node->type != NODE_STEP) return;
-    
     printf("  --- Executing Step %s ---\n", node->value);
-    
-    // Call the new helper function to execute the actions within the step
+    enter_scope();
     execute_action_list(node->child);
+    exit_scope();
 }
 
 void execute_recipe(ast_node* node) {
     if (!node || node->type != NODE_RECIPE) return;
-
-    // The first child is the IDENTIFIER, the second is the step list
     printf("--- Executing Recipe: %s ---\n", node->child->value);
-    
     ast_node* current_step = node->child->sibling;
     while(current_step != NULL) {
         execute_step(current_step);
@@ -239,10 +248,12 @@ void execute_recipe(ast_node* node) {
 
 void execute_program(ast_node* node) {
     if (!node || node->type != NODE_PROGRAM) return;
-
     execute_recipe(node->child);
 }
 %}
+
+/* resto del file invariato: union, tokens, grammar, print_ast, main */
+
 
 // === UNION & TOKENS ===
 %union {
