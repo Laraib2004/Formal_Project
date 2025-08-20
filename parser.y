@@ -515,8 +515,8 @@ int main(int argc, char **argv) {
         yyin = file;
     }
 
-    // Initialize the symbol table
-    symbol_table = NULL;
+    // Initialize the scope stack
+    scope_stack = NULL;
 
     int result = yyparse();
     
