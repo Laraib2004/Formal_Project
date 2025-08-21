@@ -1,0 +1,10 @@
+recipe Test_IF_Variable_Isolation {
+    step 1 {
+        set base_temp = 80;
+        if (base_temp == 80) {
+            set cooking_time = 15;
+            get pot;
+        }
+        set final_time = cooking_time;
+    }
+}

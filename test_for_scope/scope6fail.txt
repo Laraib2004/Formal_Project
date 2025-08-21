@@ -1,0 +1,6 @@
+recipe Test_Variable_Redeclaration {
+    step 1 {
+        set timer = 5;
+        set timer = 10;
+    }
+}

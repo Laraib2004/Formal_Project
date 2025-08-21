@@ -1,0 +1,8 @@
+recipe Test_Tool_Redeclaration {
+    step 1 {
+        get pot;
+    }
+    step 2 {
+        get pot;
+    }
+}

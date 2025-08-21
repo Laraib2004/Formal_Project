@@ -1,0 +1,15 @@
+recipe Test_Global_Tools {
+    step 1 {
+        get pot;
+        get pan;
+    }
+    step 2 {
+        add water 1 L to pot;
+        add oil 50 g to pan;
+    }
+    step 3 {
+        cook water in pot 5 min;
+        serve Test_Global_Tools;
+    }
+}
+

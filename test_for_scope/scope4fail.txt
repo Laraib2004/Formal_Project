@@ -1,0 +1,8 @@
+recipe Test_Undeclared_Tool {
+    step 1 {
+        set temp = 100;
+    }
+    step 2 {
+        add water 1 L to missing_pot;
+    }
+}

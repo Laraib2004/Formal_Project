@@ -1,0 +1,11 @@
+recipe Test_Cross_Step_IF_Variable {
+    step 1 {
+        get pot;
+        if (1 == 1) {
+            set secret_ingredient = salt;
+        }
+    }
+    step 2 {
+        add salt 10 g to pot;
+    }
+}

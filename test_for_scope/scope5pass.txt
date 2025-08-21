@@ -1,0 +1,22 @@
+recipe Test_Complex_Scoping {
+    step 1 {
+        get pot;
+        get pan;
+        set base_temp = 100;
+    }
+    step 2 {
+        add water 2 L to pot;
+        if (base_temp == 100) {
+            set local_timer = 10;
+            add salt 5 g to pot;
+        }
+        cook water in pot 15 min;
+    }
+    step 3 {
+        add oil 30 g to pan;
+        get spatula;
+        mix pan;
+        serve Test_Complex_Scoping;
+    }
+}
+

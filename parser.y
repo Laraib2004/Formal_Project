@@ -10,7 +10,14 @@ extern int yylineno;
 extern char* yytext;
 
 void yyerror(const char *s) {
-    fprintf(stderr, "Syntax error at line %d near '%s': %s\n", yylineno, yytext, s);
+    fprintf(stderr, "\n COOKING ERROR at line %d near '%s':\n", yylineno, yytext);
+    fprintf(stderr, "   %s\n", s);
+
+    // Add helpful hints
+    if (strstr(s, "not declared") || strstr(s, "non dichiarata")) {
+        fprintf(stderr, "   Hint: Did you forget to 'get' this tool or 'add' this ingredient?\n");
+    }
+    fprintf(stderr, "\n");
 }
 
 // === AST DATA STRUCTURES ===
@@ -72,6 +79,7 @@ typedef struct symbol_entry {
     char* name;
     symbol_type type;
     char* value;
+    int used;  //  Track if symbol is used
     struct symbol_entry* next;
 } symbol_entry;
 
@@ -81,6 +89,7 @@ typedef struct scope {
 } scope;
 
 scope* scope_stack = NULL;
+scope* global_recipe_scope = NULL;
 
 // Scope management
 void enter_scope() {
@@ -88,7 +97,7 @@ void enter_scope() {
     new_scope->symbols = NULL;
     new_scope->next = scope_stack;
     scope_stack = new_scope;
-    printf(">>> Entering new scope\n");
+    printf(">>> Entering new local scope\n");
 }
 
 void exit_scope() {
@@ -109,36 +118,175 @@ void exit_scope() {
     printf("<<< Exiting scope\n");
 }
 
+void init_recipe_scope() {
+    if (global_recipe_scope) return; // Already initialized
+
+    global_recipe_scope = malloc(sizeof(scope));
+    global_recipe_scope->symbols = NULL;
+    global_recipe_scope->next = NULL;
+    printf(">>> Initializing global recipe scope\n");
+}
+
+void cleanup_recipe_scope() {
+    if (!global_recipe_scope) return;
+
+    // Free symbols
+    symbol_entry* e = global_recipe_scope->symbols;
+    while (e) {
+        symbol_entry* tmp = e;
+        e = e->next;
+        free(tmp->name);
+        if (tmp->value) free(tmp->value);
+        free(tmp);
+    }
+    free(global_recipe_scope);
+    global_recipe_scope = NULL;
+    printf("<<< Cleaning up global recipe scope\n");
+}
+
 struct symbol_entry* lookup_symbol(char* name) {
+    // First check local scope stack
     for (scope* s = scope_stack; s; s = s->next) {
         for (symbol_entry* e = s->symbols; e; e = e->next) {
             if (strcmp(e->name, name) == 0) {
+                printf("Found '%s' in LOCAL scope\n", name);
                 return e;
             }
         }
     }
+
+    // Then check global recipe scope
+    if (global_recipe_scope) {
+        for (symbol_entry* e = global_recipe_scope->symbols; e; e = e->next) {
+            if (strcmp(e->name, name) == 0) {
+                printf("Found '%s' in GLOBAL scope\n", name);
+                return e;
+            }
+        }
+    }
+
     return NULL;
 }
 
-void insert_symbol(char* name, symbol_type type) {
-    if (!scope_stack) enter_scope(); // ensure a scope exists
-    if (lookup_symbol(name)) {
-        fprintf(stderr, "Error: symbol '%s' already declared in visible scope.\n", name);
-        return;
+// Function to validate symbol exists and mark as used
+void validate_symbol_exists(char* name, const char* context) {
+    struct symbol_entry* entry = lookup_symbol(name);
+    if (!entry) {
+        fprintf(stderr, "ERROR: '%s' not declared (used in %s)\n", name, context);
+        fprintf(stderr, "   Hint: Did you forget to 'get %s' or 'add %s'?\n", name, name);
+        exit(1);
     }
+    entry->used = 1;  // Mark as used
+}
+
+void insert_symbol(char* name, symbol_type type) {
+    // Ensure global scope exists
+    if (!global_recipe_scope) init_recipe_scope();
+
+    scope* target_scope;
+    const char* scope_name;
+
+    // Decide where to put the symbol based on type
+    if (type == SYMBOL_TOOL || type == SYMBOL_INGREDIENT) {
+        target_scope = global_recipe_scope;
+        scope_name = "GLOBAL";
+    } else { // SYMBOL_VARIABLE
+        if (!scope_stack) enter_scope(); // ensure local scope exists
+        target_scope = scope_stack;
+        scope_name = "LOCAL";
+    }
+
+    // Check for redeclaration in the target scope
+    for (symbol_entry* e = target_scope->symbols; e; e = e->next) {
+        if (strcmp(e->name, name) == 0) {
+            // CHANGE: Make tool/ingredient redeclaration a warning instead of error
+            if (type == SYMBOL_TOOL || type == SYMBOL_INGREDIENT) {
+                printf("Warning: %s '%s' already available (ignoring redeclaration)\n",
+                       (type == SYMBOL_TOOL) ? "Tool" : "Ingredient", name);
+                return;  // Don't create duplicate, just ignore
+            } else {
+                // Variables still give errors for redeclaration in same scope
+                fprintf(stderr, "ERROR: Variable '%s' già dichiarato in scope %s.\n", name, scope_name);
+                return;
+            }
+        }
+    }
+
+    // Create new entry
     symbol_entry* new_entry = malloc(sizeof(symbol_entry));
     new_entry->name = strdup(name);
     new_entry->type = type;
     new_entry->value = NULL;
-    new_entry->next = scope_stack->symbols;
-    scope_stack->symbols = new_entry;
+    new_entry->used = 0;  // Initialize as unused
+    new_entry->next = target_scope->symbols;
+    target_scope->symbols = new_entry;
+
+    // Enhanced output
     printf("Symbol Table: Added '%s' as ", name);
-    if (type == SYMBOL_TOOL) printf("TOOL.\n");
-    else if (type == SYMBOL_INGREDIENT) printf("INGREDIENT.\n");
-    else if (type == SYMBOL_VARIABLE) printf("VARIABLE.\n");
+    if (type == SYMBOL_TOOL) printf("TOOL in %s scope.\n", scope_name);
+    else if (type == SYMBOL_INGREDIENT) printf("INGREDIENT in %s scope.\n", scope_name);
+    else if (type == SYMBOL_VARIABLE) printf("VARIABLE in %s scope.\n", scope_name);
 }
 
-// === INTERPRETER FUNCTIONS (unchanged, except lookup/insert now use scoped table) ===
+// NEW: Check for unused symbols at end of recipe
+void check_unused_symbols() {
+    printf("\n=== UNUSED SYMBOLS CHECK ===\n");
+    int found_unused = 0;
+
+    if (global_recipe_scope) {
+        for (symbol_entry* e = global_recipe_scope->symbols; e; e = e->next) {
+            if (!e->used) {
+                printf("Warning: %s '%s' declared but never used\n",
+                       (e->type == SYMBOL_TOOL) ? "Tool" : "Ingredient", e->name);
+                found_unused = 1;
+            }
+        }
+    }
+
+    if (!found_unused) {
+        printf("All declared symbols were used!\n");
+    }
+    printf("============================\n");
+}
+
+void print_all_scopes() {
+    printf("\n=== SCOPE DEBUG ===\n");
+
+    printf("GLOBAL RECIPE SCOPE:\n");
+    if (global_recipe_scope && global_recipe_scope->symbols) {
+        for (symbol_entry* e = global_recipe_scope->symbols; e; e = e->next) {
+            const char* type_str = (e->type == SYMBOL_TOOL) ? "TOOL" :
+                                  (e->type == SYMBOL_INGREDIENT) ? "INGREDIENT" : "VARIABLE";
+            printf("  %s (%s) = %s [%s]\n", e->name, type_str,
+                   e->value ? e->value : "NULL", e->used ? "USED" : "UNUSED");
+        }
+    } else {
+        printf("  (empty)\n");
+    }
+
+    printf("LOCAL SCOPE STACK:\n");
+    if (scope_stack) {
+        int level = 0;
+        for (scope* s = scope_stack; s; s = s->next) {
+            printf("  Level %d:\n", level++);
+            if (s->symbols) {
+                for (symbol_entry* e = s->symbols; e; e = e->next) {
+                    const char* type_str = (e->type == SYMBOL_TOOL) ? "TOOL" :
+                                          (e->type == SYMBOL_INGREDIENT) ? "INGREDIENT" : "VARIABLE";
+                    printf("    %s (%s) = %s [%s]\n", e->name, type_str,
+                           e->value ? e->value : "NULL", e->used ? "USED" : "UNUSED");
+                }
+            } else {
+                printf("    (empty)\n");
+            }
+        }
+    } else {
+        printf("  (empty)\n");
+    }
+    printf("===================\n\n");
+}
+
+// === INTERPRETER FUNCTIONS WITH VALIDATION ===
 void execute_if(ast_node* node);
 void execute_assignment(ast_node* node);
 void execute_action_node(ast_node* node);
@@ -154,6 +302,9 @@ void execute_if(ast_node* node) {
 
     printf("        * Condition is: %s == %s\n", condition_node->child->value, condition_node->child->sibling->value);
 
+    // VALIDATION: Check if condition variables exist
+    validate_symbol_exists(condition_node->child->value, "IF condition");
+
     enter_scope();
     execute_action_list(action_list); 
     exit_scope();
@@ -165,6 +316,11 @@ void execute_assignment(ast_node* node) {
 
     printf("        * Executing SET statement...\n");
 
+    // VALIDATION: If value is an identifier, check it exists
+    if (value_node->type == NODE_IDENTIFIER) {
+        validate_symbol_exists(value_node->value, "assignment value");
+    }
+
     if (!lookup_symbol(variable_node->value)) {
         insert_symbol(variable_node->value, SYMBOL_VARIABLE);
     }
@@ -173,47 +329,91 @@ void execute_assignment(ast_node* node) {
     if (entry) {
         if (entry->value) free(entry->value);
         entry->value = strdup(value_node->value);
+        entry->used = 1;  // Mark variable as used when assigned
         printf("        * Set variable '%s' to '%s'\n", entry->name, entry->value);
     } else {
         fprintf(stderr, "Error: variable '%s' not declared\n", variable_node->value);
     }
 }
 
+// Global variable to store recipe name
+char* current_recipe_name = NULL;
+
 void execute_action_node(ast_node* node) {
     if (strcmp(node->value, "get") == 0) {
         printf("        * Getting %s\n", node->child->value);
+        // Mark tool as used when gotten
+        struct symbol_entry* entry = lookup_symbol(node->child->value);
+        if (entry) entry->used = 1;
+
     } else if (strcmp(node->value, "add") == 0) {
         ast_node* arg1 = node->child;
         ast_node* arg2 = arg1->sibling;
+
+        // Mark ingredient as used when added
+        struct symbol_entry* entry = lookup_symbol(arg1->value);
+        if (entry) entry->used = 1;
+
         if (arg2->type == NODE_INTEGER) {
             ast_node* arg3 = arg2->sibling;
             ast_node* arg4 = arg3->sibling;
+            // VALIDATION: Check if tool exists
+            validate_symbol_exists(arg4->value, "add action (tool)");
             printf("        * Adding %s %s of %s to %s\n", arg2->value, arg3->value, arg1->value, arg4->value);
         } else {
+            // VALIDATION: Check if target container exists
+            validate_symbol_exists(arg2->value, "add action (container)");
             printf("        * Adding %s to %s\n", arg1->value, arg2->value);
         }
+
     } else if (strcmp(node->value, "cook") == 0) {
         ast_node* arg1 = node->child;
         ast_node* arg2 = arg1->sibling;
         ast_node* arg3 = arg2->sibling;
         ast_node* arg4 = arg3->sibling;
+        // VALIDATION: Check if ingredient and tool exist
+        validate_symbol_exists(arg1->value, "cook action (ingredient)");
+        validate_symbol_exists(arg2->value, "cook action (tool)");
         printf("        * Cooking %s in %s for %s %s\n", arg1->value, arg2->value, arg3->value, arg4->value);
+
     } else if (strcmp(node->value, "return") == 0) {
+        // VALIDATION: Check if return value exists
+        validate_symbol_exists(node->child->value, "return statement");
         printf("        * Returning %s\n", node->child->value);
+
     } else if (strcmp(node->value, "boil") == 0) {
         ast_node* arg1 = node->child;
         ast_node* arg2 = arg1->sibling;
         ast_node* arg3 = arg2->sibling;
         ast_node* arg4 = arg3->sibling;
+        // VALIDATION: Check if ingredient and tool exist
+        validate_symbol_exists(arg1->value, "boil action (ingredient)");
+        validate_symbol_exists(arg2->value, "boil action (tool)");
         printf("        * Boiling %s in %s for %s %s\n", arg1->value, arg2->value, arg3->value, arg4->value);
+
     } else if (strcmp(node->value, "drain") == 0) {
         ast_node* arg1 = node->child;
         ast_node* arg2 = arg1->sibling;
+        // VALIDATION: Check if both arguments exist
+        validate_symbol_exists(arg1->value, "drain action (ingredient)");
+        validate_symbol_exists(arg2->value, "drain action (tool)");
         printf("        * Draining %s using %s\n", arg1->value, arg2->value);
+
     } else if (strcmp(node->value, "mix") == 0) {
+        // VALIDATION: Check if ingredient/mixture exists
+        validate_symbol_exists(node->child->value, "mix action");
         printf("        * Mixing %s\n", node->child->value);
+
     } else if (strcmp(node->value, "serve") == 0) {
-        printf("        * Serving the dish: %s\n", node->child->value);
+        // SPECIAL CASE: Allow serving the recipe itself (final dish)
+        char* serve_target = node->child->value;
+        if (current_recipe_name && strcmp(serve_target, current_recipe_name) == 0) {
+            printf("        * Serving the dish: %s (recipe complete!)\n", serve_target);
+        } else {
+            // VALIDATION: Check if dish exists
+            validate_symbol_exists(serve_target, "serve action");
+            printf("        * Serving the dish: %s\n", serve_target);
+        }
     }
 }
 
@@ -241,12 +441,19 @@ void execute_step(ast_node* node) {
 
 void execute_recipe(ast_node* node) {
     if (!node || node->type != NODE_RECIPE) return;
-    printf("--- Executing Recipe: %s ---\n", node->child->value);
+
+    // Store recipe name for serve validation
+    current_recipe_name = node->child->value;
+    printf("--- Executing Recipe: %s ---\n", current_recipe_name);
+
     ast_node* current_step = node->child->sibling;
     while(current_step != NULL) {
         execute_step(current_step);
         current_step = current_step->sibling;
     }
+
+    // Check for unused symbols at end of recipe
+    check_unused_symbols();
 }
 
 void execute_program(ast_node* node) {
@@ -255,10 +462,7 @@ void execute_program(ast_node* node) {
 }
 %}
 
-/* rest of the file unchanged: union, tokens, grammar, print_ast, main */
-
-
-// === UNION & TOKENS ===
+// === UNION & TOKENS (unchanged) ===
 %union {
     int int_val;
     double double_val;
@@ -372,7 +576,9 @@ assignment:
 
 action_list:
     action SEMICOLON { $$ = $1; }
-    | action_list action SEMICOLON { $$ = add_sibling($1, $2); }
+   | action { $$ = $1; }
+       | action_list action SEMICOLON { $$ = add_sibling($1, $2); }
+       | action_list action { $$ = add_sibling($1, $2); }
     ;
 
 action:
@@ -537,8 +743,12 @@ int main(int argc, char **argv) {
         printf("Parsing failed.\n");
     }
 
+    // Cleanup
+    cleanup_recipe_scope();
+    
     if (yyin != stdin) {
         fclose(yyin);
     }
     return result;
 }
+

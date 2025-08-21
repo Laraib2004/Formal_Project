@@ -1,0 +1,13 @@
+recipe Test_Variable_Persistence {
+    step 1 {
+        set temperature = 100;
+        get stove;
+        get pot;
+    }
+    step 2 {
+        if (temperature == 100) {
+            get timer;
+            add water 1 L to pot;
+        }
+    }
+}
