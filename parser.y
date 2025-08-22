@@ -11,12 +11,23 @@ extern char* yytext;
 
 void yyerror(const char *s) {
     fprintf(stderr, "\n COOKING ERROR at line %d near '%s':\n", yylineno, yytext);
-    fprintf(stderr, "   %s\n", s);
+    fprintf(stderr, "   Problem: %s\n", s);
 
     // Add helpful hints
     if (strstr(s, "not declared") || strstr(s, "non dichiarata")) {
-        fprintf(stderr, "   Hint: Did you forget to 'get' this tool or 'add' this ingredient?\n");
+        fprintf(stderr, "   Fix: Did you forget to 'get' this tool or 'add' this ingredient?\n");
+        fprintf(stderr, "   Common tools: pot, pan, spoon, bowl\n");
     }
+    else if (strstr(s, "syntax error")) {
+        fprintf(stderr, "   Fix: Check for missing semicolon ';' or closing brace '}'\n");
+        fprintf(stderr, "   Recipe structure: recipe name { step 1 { actions; } }\n");
+    }
+    else if (strstr(s, "unexpected")) {
+        fprintf(stderr, "   Fix: Check spelling and recipe syntax\n");
+        fprintf(stderr, "   Valid actions: get, add, cook, boil, mix, serve\n");
+    }
+    
+    fprintf(stderr, "   Context: Recipe preparation step\n");
     fprintf(stderr, "\n");
 }
 
@@ -172,8 +183,21 @@ struct symbol_entry* lookup_symbol(char* name) {
 void validate_symbol_exists(char* name, const char* context) {
     struct symbol_entry* entry = lookup_symbol(name);
     if (!entry) {
-        fprintf(stderr, "ERROR: '%s' not declared (used in %s)\n", name, context);
-        fprintf(stderr, "   Hint: Did you forget to 'get %s' or 'add %s'?\n", name, name);
+        fprintf(stderr, "\n COOKING MISTAKE: '%s' not available!\n", name);
+        fprintf(stderr, "   Used in: %s\n", context);
+        
+        // Suggerimenti specifici per contesto
+        if (strstr(context, "tool") || strstr(context, "cook") || strstr(context, "boil")) {
+            fprintf(stderr, "   Quick fix: Add 'get %s;' before using it\n", name);
+        } 
+        else if (strstr(context, "ingredient") || strstr(context, "add")) {
+            fprintf(stderr, "   Quick fix: Add 'add %s to container;' first\n", name);
+        }
+        else {
+            fprintf(stderr, "   Quick fix: Declare '%s' before using it\n", name);
+        }
+        
+        fprintf(stderr, "\n");
         exit(1);
     }
     entry->used = 1;  // Mark as used
@@ -230,23 +254,25 @@ void insert_symbol(char* name, symbol_type type) {
 
 // NEW: Check for unused symbols at end of recipe
 void check_unused_symbols() {
-    printf("\n=== UNUSED SYMBOLS CHECK ===\n");
+    printf("\n=== KITCHEN EFFICIENCY CHECK ===\n");
     int found_unused = 0;
 
     if (global_recipe_scope) {
         for (symbol_entry* e = global_recipe_scope->symbols; e; e = e->next) {
             if (!e->used) {
-                printf("Warning: %s '%s' declared but never used\n",
-                       (e->type == SYMBOL_TOOL) ? "Tool" : "Ingredient", e->name);
+                const char* type_str = (e->type == SYMBOL_TOOL) ? "Tool" : "Ingredient";
+                
+                printf("Warning: %s '%s' prepared but never used\n", type_str, e->name);
+                printf("   Tip: Remove unused declarations for cleaner recipes\n");
                 found_unused = 1;
             }
         }
     }
 
     if (!found_unused) {
-        printf("All declared symbols were used!\n");
+        printf("Perfect! All ingredients and tools were used efficiently!\n");
     }
-    printf("============================\n");
+    printf("=====================================\n");
 }
 
 void print_all_scopes() {
@@ -751,4 +777,3 @@ int main(int argc, char **argv) {
     }
     return result;
 }
-
