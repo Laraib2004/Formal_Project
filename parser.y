@@ -110,7 +110,9 @@ void enter_scope() {
     new_scope->symbols = NULL;
     new_scope->next = scope_stack;
     scope_stack = new_scope;
-    printf(">>> Entering new local scope\n");
+
+    // X DEBUG
+    // printf(">>> Entering new local scope\n");
 }
 
 void exit_scope() {
@@ -128,7 +130,8 @@ void exit_scope() {
         free(tmp);
     }
     free(old);
-    printf("<<< Exiting scope\n");
+    // X DEBUG
+    // printf("<<< Exiting scope\n");
 }
 
 void init_recipe_scope() {
@@ -172,7 +175,8 @@ struct symbol_entry* lookup_symbol(char* name) {
     if (global_recipe_scope) {
         for (symbol_entry* e = global_recipe_scope->symbols; e; e = e->next) {
             if (strcmp(e->name, name) == 0) {
-                printf("Found '%s' in GLOBAL scope\n", name);
+
+                // printf("Found '%s' in GLOBAL scope\n", name);
                 return e;
             }
         }
@@ -544,7 +548,7 @@ void execute_while(ast_node* node) {
 }
 
 void execute_repeat(ast_node* node) {
-    printf("        * Executing REPEAT loop...\n");
+    // printf("        * Executing REPEAT loop...\n");
     ast_node* times_node = node->child;
     ast_node* action_list = times_node->sibling;
     
@@ -572,13 +576,13 @@ void execute_repeat(ast_node* node) {
     }
     
     for (int i = 1; i <= times; i++) {
-        printf("        * REPEAT iteration %d of %d\n", i, times);
+        // printf("        * REPEAT iteration %d of %d\n", i, times);
         enter_scope();
         execute_action_list(action_list);
         exit_scope();
     }
 
-    printf("        * REPEAT loop completed after %d iterations\n", times);
+    // printf("        * REPEAT loop completed after %d iterations\n", times);
 }
 
 void execute_program(ast_node* node) {
