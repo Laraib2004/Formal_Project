@@ -3,6 +3,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+// Global debug flag
+#define DEBUG 0
+
 extern int yylex();
 extern FILE *yyin;
 
@@ -111,8 +114,9 @@ void enter_scope() {
     new_scope->next = scope_stack;
     scope_stack = new_scope;
 
-    // X DEBUG
-    // printf(">>> Entering new local scope\n");
+    if (DEBUG) {
+        printf(">>> Entering new local scope\n");
+    }
 }
 
 void exit_scope() {
@@ -130,8 +134,10 @@ void exit_scope() {
         free(tmp);
     }
     free(old);
-    // X DEBUG
-    // printf("<<< Exiting scope\n");
+
+    if (DEBUG) {
+        printf("<<< Exiting scope\n");
+    }
 }
 
 void init_recipe_scope() {
@@ -165,7 +171,9 @@ struct symbol_entry* lookup_symbol(char* name) {
     for (scope* s = scope_stack; s; s = s->next) {
         for (symbol_entry* e = s->symbols; e; e = e->next) {
             if (strcmp(e->name, name) == 0) {
-                printf("Found '%s' in LOCAL scope\n", name);
+                if (DEBUG) {
+                    printf("Found '%s' in LOCAL scope\n", name);
+                }
                 return e;
             }
         }
@@ -175,8 +183,9 @@ struct symbol_entry* lookup_symbol(char* name) {
     if (global_recipe_scope) {
         for (symbol_entry* e = global_recipe_scope->symbols; e; e = e->next) {
             if (strcmp(e->name, name) == 0) {
-
-                // printf("Found '%s' in GLOBAL scope\n", name);
+                if (DEBUG) {
+                    printf("Found '%s' in GLOBAL scope\n", name);
+                }
                 return e;
             }
         }
@@ -281,6 +290,7 @@ void check_unused_symbols() {
     printf("=====================================\n");
 }
 
+// Method used for debugging
 void print_all_scopes() {
     printf("\n=== SCOPE DEBUG ===\n");
 
@@ -533,7 +543,9 @@ void execute_while(ast_node* node) {
     
     while (evaluate_condition(condition_node) && iterations < MAX_ITERATIONS) {
         iterations++;
-        printf("        * WHILE iteration %d (condition still true)\n", iterations);
+        if (DEBUG) {
+            printf("        * WHILE iteration %d (condition still true)\n", iterations);
+        }
         
         enter_scope();
         execute_action_list(action_list);
@@ -543,12 +555,16 @@ void execute_while(ast_node* node) {
     if (iterations >= MAX_ITERATIONS) {
         printf("        * WHILE loop stopped: reached maximum %d iterations (safety limit)\n", MAX_ITERATIONS);
     } else {
-        printf("        * WHILE loop completed after %d iterations (condition became false)\n", iterations);
+        if (DEBUG) {
+            printf("        * WHILE loop completed after %d iterations (condition became false)\n", iterations);
+        }
     }
 }
 
 void execute_repeat(ast_node* node) {
-    // printf("        * Executing REPEAT loop...\n");
+    if (DEBUG) {
+        printf("        * Executing REPEAT loop...\n");
+    }
     ast_node* times_node = node->child;
     ast_node* action_list = times_node->sibling;
     
@@ -576,13 +592,17 @@ void execute_repeat(ast_node* node) {
     }
     
     for (int i = 1; i <= times; i++) {
-        // printf("        * REPEAT iteration %d of %d\n", i, times);
+        if (DEBUG) {
+            printf("        * REPEAT iteration %d of %d\n", i, times);
+        }
         enter_scope();
         execute_action_list(action_list);
         exit_scope();
     }
 
-    // printf("        * REPEAT loop completed after %d iterations\n", times);
+    if (DEBUG) {
+        printf("        * REPEAT loop completed after %d iterations\n", times);
+    }
 }
 
 void execute_program(ast_node* node) {
@@ -911,4 +931,5 @@ int main(int argc, char **argv) {
     }
     return result;
 }
+
 
