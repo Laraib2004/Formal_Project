@@ -43,7 +43,9 @@ typedef enum {
     NODE_IF,
     NODE_ASSIGNMENT,
     NODE_STRING,
-    NODE_CONDITION
+    NODE_CONDITION,
+    NODE_WHILE,
+    NODE_REPEAT
 } ast_node_type;
 
 typedef struct ast_node {
@@ -252,7 +254,7 @@ void insert_symbol(char* name, symbol_type type) {
     else if (type == SYMBOL_VARIABLE) printf("VARIABLE in %s scope.\n", scope_name);
 }
 
-// NEW: Check for unused symbols at end of recipe
+// Check for unused symbols at end of recipe
 void check_unused_symbols() {
     printf("\n=== KITCHEN EFFICIENCY CHECK ===\n");
     int found_unused = 0;
@@ -319,6 +321,9 @@ void execute_action_node(ast_node* node);
 void execute_action_list(ast_node* node);
 void execute_step(ast_node* node);
 void execute_recipe(ast_node* node);
+int evaluate_condition(ast_node* condition_node);
+void execute_while(ast_node* node);
+void execute_repeat(ast_node* node);
 void execute_program(ast_node* node);
 
 void execute_if(ast_node* node) {
@@ -326,14 +331,17 @@ void execute_if(ast_node* node) {
     ast_node* condition_node = node->child;
     ast_node* action_list = condition_node->sibling;
 
-    printf("        * Condition is: %s == %s\n", condition_node->child->value, condition_node->child->sibling->value);
-
     // VALIDATION: Check if condition variables exist
     validate_symbol_exists(condition_node->child->value, "IF condition");
 
-    enter_scope();
-    execute_action_list(action_list); 
-    exit_scope();
+    if (evaluate_condition(condition_node)) {
+        printf("        * Condition is TRUE - executing actions\n");
+        enter_scope();
+        execute_action_list(action_list);
+        exit_scope();
+    } else {
+        printf("        * Condition is FALSE - skipping actions\n");
+    }
 }
 
 void execute_assignment(ast_node* node) {
@@ -452,10 +460,15 @@ void execute_action_list(ast_node* node) {
             execute_assignment(current_action);
         } else if (current_action->type == NODE_IF) {
             execute_if(current_action);
+        } else if (current_action->type == NODE_WHILE) {
+            execute_while(current_action);
+        } else if (current_action->type == NODE_REPEAT) {
+            execute_repeat(current_action);
         }
         current_action = current_action->sibling;
     }
 }
+
 
 void execute_step(ast_node* node) {
     if (!node || node->type != NODE_STEP) return;
@@ -482,6 +495,92 @@ void execute_recipe(ast_node* node) {
     check_unused_symbols();
 }
 
+int evaluate_condition(ast_node* condition_node) {
+    if (!condition_node || condition_node->type != NODE_CONDITION) return 0;
+    
+    ast_node* left = condition_node->child;
+    ast_node* right = left->sibling;
+    
+    char* left_value = NULL;
+    if (left->type == NODE_IDENTIFIER) {
+        struct symbol_entry* entry = lookup_symbol(left->value);
+        left_value = entry ? entry->value : left->value;
+    } else {
+        left_value = left->value;
+    }
+    
+    char* right_value = right->value;
+    
+    if (left_value && right_value) {
+        return strcmp(left_value, right_value) == 0;
+    }
+    return 0;
+}
+
+void execute_while(ast_node* node) {
+    printf("        * Executing WHILE loop...\n");
+    ast_node* condition_node = node->child;
+    ast_node* action_list = condition_node->sibling;
+    
+    validate_symbol_exists(condition_node->child->value, "WHILE condition");
+    
+    int iterations = 0;
+    const int MAX_ITERATIONS = 1000;
+    
+    while (evaluate_condition(condition_node) && iterations < MAX_ITERATIONS) {
+        iterations++;
+        printf("        * WHILE iteration %d (condition still true)\n", iterations);
+        
+        enter_scope();
+        execute_action_list(action_list);
+        exit_scope();
+    }
+
+    if (iterations >= MAX_ITERATIONS) {
+        printf("        * WHILE loop stopped: reached maximum %d iterations (safety limit)\n", MAX_ITERATIONS);
+    } else {
+        printf("        * WHILE loop completed after %d iterations (condition became false)\n", iterations);
+    }
+}
+
+void execute_repeat(ast_node* node) {
+    printf("        * Executing REPEAT loop...\n");
+    ast_node* times_node = node->child;
+    ast_node* action_list = times_node->sibling;
+    
+    int times = 0;
+    if (times_node->type == NODE_INTEGER) {
+        times = atoi(times_node->value);
+    } else if (times_node->type == NODE_IDENTIFIER) {
+        validate_symbol_exists(times_node->value, "REPEAT times");
+        struct symbol_entry* entry = lookup_symbol(times_node->value);
+        if (entry && entry->value) {
+            times = atoi(entry->value);
+        } else {
+            fprintf(stderr, "Error: Variable '%s' has no numeric value for REPEAT\n", times_node->value);
+            return;
+        }
+    }
+
+    // Limit to prevent infinite loops
+    if (times > 100) {
+        fprintf(stderr, "WARNING: REPEAT %d times seems excessive - limiting to 100\n", times);
+        times = 100;
+    } else if (times < 0) {
+        fprintf(stderr, "WARNING: REPEAT %d times is negative - skipping loop\n", times);
+        return;
+    }
+    
+    for (int i = 1; i <= times; i++) {
+        printf("        * REPEAT iteration %d of %d\n", i, times);
+        enter_scope();
+        execute_action_list(action_list);
+        exit_scope();
+    }
+
+    printf("        * REPEAT loop completed after %d iterations\n", times);
+}
+
 void execute_program(ast_node* node) {
     if (!node || node->type != NODE_PROGRAM) return;
     execute_recipe(node->child);
@@ -503,12 +602,13 @@ void execute_program(ast_node* node) {
 %token L_UNIT G_UNIT P_UNIT MIN_UNIT
 %token LBRACE RBRACE SEMICOLON
 %token IF LPAREN RPAREN EQ_OP
+%token WHILE REPEAT TIMES
 %token SET ASSIGN
 
 %start program
 
 // === AST NODE TYPES FOR GRAMMAR RULES ===
-%type <node_ptr> program recipe_declaration step_list step_declaration action_list action if_statement condition assignment 
+%type <node_ptr> program recipe_declaration step_list step_declaration action_list action if_statement condition assignment while_statement repeat_statement
 
 %%
 
@@ -574,6 +674,32 @@ condition:
         condition_node->child = new_node(NODE_IDENTIFIER, $1);
         condition_node->child->sibling = new_node(NODE_STRING, $3);
         $$ = condition_node;
+    }
+    ;
+
+while_statement:
+    WHILE LPAREN condition RPAREN LBRACE action_list RBRACE {
+        ast_node* while_node = new_node(NODE_WHILE, "while");
+        while_node->child = $3;
+        while_node->child->sibling = $6;
+        $$ = while_node;
+    }
+    ;
+
+repeat_statement:
+    REPEAT INTEGER_LITERAL TIMES LBRACE action_list RBRACE {
+        ast_node* repeat_node = new_node(NODE_REPEAT, "repeat");
+        char num_str[16];
+        sprintf(num_str, "%d", $2);
+        repeat_node->child = new_node(NODE_INTEGER, num_str);
+        repeat_node->child->sibling = $5;
+        $$ = repeat_node;
+    }
+    | REPEAT IDENTIFIER TIMES LBRACE action_list RBRACE {
+        ast_node* repeat_node = new_node(NODE_REPEAT, "repeat");
+        repeat_node->child = new_node(NODE_IDENTIFIER, $2);
+        repeat_node->child->sibling = $5;
+        $$ = repeat_node;
     }
     ;
 
@@ -697,6 +823,8 @@ action:
     }
     | assignment
     | if_statement
+    | while_statement
+    | repeat_statement
     ;
 
 %%
@@ -722,6 +850,8 @@ void print_ast(struct ast_node* node, int level) {
         case NODE_ASSIGNMENT:   type_str = "ASSIGNMENT"; break;
         case NODE_STRING:       type_str = "STRING"; break;
         case NODE_CONDITION:    type_str = "CONDITION"; break;
+        case NODE_WHILE:        type_str = "WHILE"; break;
+        case NODE_REPEAT:       type_str = "REPEAT"; break;
         default:                type_str = "UNKNOWN"; break;
     }
 
@@ -777,3 +907,4 @@ int main(int argc, char **argv) {
     }
     return result;
 }
+

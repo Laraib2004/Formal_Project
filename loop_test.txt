@@ -1,0 +1,46 @@
+recipe Test_All_Loop_Cases {
+    step 1 {
+        get pot;
+        get pan;
+    }
+    
+    step 2 {
+        repeat 3 times {
+            add salt 10 g to pot;
+            add oil 5 g to pan;
+        }
+    }
+    
+    step 3 {
+        set counter = 0;
+        while (counter == 0) {
+            add water 100 L to pot;
+            cook water in pot 2 min;
+            set temperature = 80;
+            set counter = 1;
+        }
+    }
+    
+    step 4 {
+        repeat 2 times {
+            boil water in pot 5 min;
+            repeat 4 times {
+                mix pot;
+                add flour 50 g to pot;
+            }
+            drain water pot;
+        }
+    }
+    
+    step 5 {
+        get mixture;
+        set done = 1;
+        while (done == 1) {
+            repeat 5 times {
+                cook mixture in pot 1 min;
+            }
+            set done = 0;
+            serve Test_All_Loop_Cases;
+        }
+    }
+}

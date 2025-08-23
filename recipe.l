@@ -32,6 +32,9 @@ char* my_strdup(const char* s) {
 "serve"         { return SERVE; }
 "if"            { return IF; }
 "set"           { return SET; }
+"while"         { return WHILE; }
+"repeat"        { return REPEAT; }
+"times"         { return TIMES; }
 "L"             { return L_UNIT; }
 "g"             { return G_UNIT; }
 "p"             { return P_UNIT; }
@@ -72,3 +75,4 @@ char* my_strdup(const char* s) {
 .               { fprintf(stderr, "Error: Invalid character '%c'\n", *yytext); }
 
 %%
+
