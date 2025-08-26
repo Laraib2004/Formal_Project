@@ -48,6 +48,15 @@ char* my_strdup(const char* s) {
 "=="            { return EQ_OP; }
 "="             { return ASSIGN; }
 
+"!="            { return NE_OP; }
+">"             { return GT_OP; }
+"<"             { return LT_OP; }
+"+"             { return ADD_OP; }
+"-"             { return SUB_OP; }
+"*"             { return MUL_OP; }
+"/"             { return DIV_OP; }
+"&&"            { return AND_OP; }
+
 [a-zA-Z_][a-zA-Z0-9_]* {
     yylval.string_val = my_strdup(yytext);
     return IDENTIFIER;

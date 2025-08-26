@@ -1,0 +1,15 @@
+recipe MyFavoritePasta {
+    step 1 {
+        get pot;
+        add water to pot;
+        set water_temperature = 100;
+    }
+    step 2 {
+        if (water_temperature < 90) {
+            boil pasta in pot 5 min;
+        };
+    }
+    step 3 {
+        serve MyFavoritePasta;
+    }
+}
