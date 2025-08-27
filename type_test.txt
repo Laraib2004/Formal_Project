@@ -1,0 +1,37 @@
+recipe Type_Mismatch_Test {
+    step 1 {
+        // Caso 1: assegno un numero come stringa e confronto con intero
+        set a = "123";
+        if (a == 123) {
+            get pot;
+        }
+    }
+
+    step 2 {
+        // Caso 2: assegno un intero e confronto con stringa numerica
+        set b = 999;
+        if (b == "999") {
+            get pan;
+        }
+    }
+
+    step 3 {
+        // Caso 3: confronto stringa e intero incrociati
+        set name = "carbonara";
+        set version = 1;
+
+        if (name == 1) {
+            get spoon;
+        }
+
+        if (version == "1") {
+            get bowl;
+        }
+    }
+
+    step 4 {
+        // Chiudiamo servendo il piatto
+        serve Type_Mismatch_Test;
+    }
+}
+

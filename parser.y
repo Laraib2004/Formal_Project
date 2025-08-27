@@ -93,7 +93,14 @@ struct ast_node* add_sibling(struct ast_node* current, struct ast_node* sibling)
 typedef enum {
     SYMBOL_INGREDIENT,
     SYMBOL_TOOL,
-    SYMBOL_VARIABLE
+    SYMBOL_VARIABLE,
+    TYPE_INT,   // Type checking additions
+    TYPE_STRING,
+    TYPE_FLOAT,
+    TYPE_UNIT_WEIGHT,
+    TYPE_UNIT_VOLUME,
+    TYPE_UNIT_TIME,
+    TYPE_UNIT_PIECE
 } symbol_type;
 
 typedef struct symbol_entry {
@@ -101,6 +108,7 @@ typedef struct symbol_entry {
     symbol_type type;
     char* value;
     int used;  //  Track if symbol is used
+    symbol_type data_type;  // Track the data type for type checking
     struct symbol_entry* next;
 } symbol_entry;
 
@@ -111,6 +119,186 @@ typedef struct scope {
 
 scope* scope_stack = NULL;
 scope* global_recipe_scope = NULL;
+
+// === FORWARD DECLARATIONS ===
+struct symbol_entry* lookup_symbol(char* name);
+void validate_symbol_exists(char* name, const char* context);
+void insert_symbol(char* name, symbol_type type, symbol_type data_type);
+void insert_symbol_legacy(char* name, symbol_type type);
+
+// Forward declarations for type checking functions
+symbol_type get_node_type(ast_node* node);
+symbol_type check_expression_type(ast_node* node);
+const char* get_type_name(symbol_type type);
+int are_types_compatible(symbol_type type1, symbol_type type2);
+void check_assignment_types(ast_node* variable_node, ast_node* value_node);
+void check_condition_types(ast_node* condition_node);
+void validate_repeat_count(ast_node* times_node);
+
+// Get type name for error messages
+const char* get_type_name(symbol_type type) {
+    switch(type) {
+        case TYPE_INT: return "integer";
+        case TYPE_STRING: return "string";
+        case TYPE_FLOAT: return "float";
+        case TYPE_UNIT_WEIGHT: return "weight_unit";
+        case TYPE_UNIT_VOLUME: return "volume_unit";
+        case TYPE_UNIT_TIME: return "time_unit";
+        case TYPE_UNIT_PIECE: return "piece_unit";
+        default: return "unknown";
+    }
+}
+
+// Check type compatibility
+int are_types_compatible(symbol_type type1, symbol_type type2) {
+    // Identical types are always compatible
+    if (type1 == type2) return 1;
+
+    // Allowed implicit conversions
+    if ((type1 == TYPE_INT && type2 == TYPE_FLOAT) ||
+        (type1 == TYPE_FLOAT && type2 == TYPE_INT)) {
+        return 1;
+    }
+
+    // Unit types can be compatible with integers in certain contexts
+    if ((type1 == TYPE_INT && (type2 == TYPE_UNIT_WEIGHT || type2 == TYPE_UNIT_VOLUME ||
+                               type2 == TYPE_UNIT_TIME || type2 == TYPE_UNIT_PIECE)) ||
+        (type2 == TYPE_INT && (type1 == TYPE_UNIT_WEIGHT || type1 == TYPE_UNIT_VOLUME ||
+                               type1 == TYPE_UNIT_TIME || type1 == TYPE_UNIT_PIECE))) {
+        return 1;
+    }
+
+    return 0; // Incompatible types
+}
+
+// Get the type of a node
+symbol_type get_node_type(ast_node* node) {
+    if (!node) {
+        fprintf(stderr, "COMPILER ERROR: Cannot determine type of NULL node\n");
+        exit(1);
+    }
+
+    switch(node->type) {
+        case NODE_INTEGER:
+            return TYPE_INT;
+        case NODE_STRING:
+            return TYPE_STRING;
+        case NODE_EXPRESSION:
+            return check_expression_type(node);
+        case NODE_IDENTIFIER: {
+            symbol_entry* entry = lookup_symbol(node->value);
+            if (!entry) {
+                fprintf(stderr, "TYPE ERROR: Unknown identifier '%s' - cannot determine type\n", node->value);
+                exit(1);
+            }
+            return entry->data_type;
+        }
+        default:
+            fprintf(stderr, "COMPILER ERROR: Cannot determine type for node type %d\n", node->type);
+            exit(1);
+    }
+}
+
+// Check expression type with proper recursion
+symbol_type check_expression_type(ast_node* node) {
+    if (!node) {
+        fprintf(stderr, "COMPILER ERROR: Cannot determine type of NULL expression node\n");
+        exit(1);
+    }
+
+    if (node->type == NODE_EXPRESSION) {
+        ast_node* left = node->child;
+        ast_node* right = node->child ? node->child->sibling : NULL;
+
+        if (!left || !right) {
+            fprintf(stderr, "COMPILER ERROR: Malformed expression node - missing operands\n");
+            exit(1);
+        }
+
+        symbol_type left_type = check_expression_type(left);
+        symbol_type right_type = check_expression_type(right);
+
+        if (!are_types_compatible(left_type, right_type)) {
+            fprintf(stderr, "TYPE ERROR: Cannot perform '%s' operation between %s and %s\n",
+                    node->value ? node->value : "unknown",
+                    get_type_name(left_type),
+                    get_type_name(right_type));
+            exit(1);
+        }
+
+        // Return promoted type
+        if (left_type == TYPE_FLOAT || right_type == TYPE_FLOAT) {
+            return TYPE_FLOAT;
+        }
+        return TYPE_INT;
+    }
+
+    return get_node_type(node);
+}
+
+// Type check for assignments
+void check_assignment_types(ast_node* variable_node, ast_node* value_node) {
+    symbol_type var_type = get_node_type(variable_node);
+    symbol_type val_type = get_node_type(value_node);
+
+    if (!are_types_compatible(var_type, val_type)) {
+        fprintf(stderr, "TYPE ERROR: Cannot assign %s to variable '%s' of type %s\n",
+                get_type_name(val_type), variable_node->value, get_type_name(var_type));
+        exit(1);
+    }
+}
+
+// Check condition types
+void check_condition_types(ast_node* condition_node) {
+    if (!condition_node) return;
+
+    if (condition_node->type == NODE_CONDITION) {
+        ast_node* left = condition_node->child;
+        ast_node* right = condition_node->child->sibling;
+
+        if (!left || !right) {
+            fprintf(stderr, "COMPILER ERROR: Malformed condition node\n");
+            exit(1);
+        }
+
+        symbol_type left_type = check_expression_type(left);
+        symbol_type right_type = check_expression_type(right);
+
+        if (!are_types_compatible(left_type, right_type)) {
+            fprintf(stderr, "TYPE ERROR: Cannot compare %s with %s in condition\n",
+                    get_type_name(left_type), get_type_name(right_type));
+            exit(1);
+        }
+
+        if (DEBUG) {
+            printf("       → Type check passed: comparing %s with %s\n",
+                   get_type_name(left_type), get_type_name(right_type));
+        }
+    }
+}
+
+// Validate repeat count with type checking
+void validate_repeat_count(ast_node* times_node) {
+    symbol_type times_type = get_node_type(times_node);
+
+    if (times_type != TYPE_INT) {
+        fprintf(stderr, "TYPE ERROR: REPEAT count must be integer, got %s\n",
+                get_type_name(times_type));
+        exit(1);
+    }
+
+    // If it's a literal, verify it's positive
+    if (times_node->type == NODE_INTEGER) {
+        int count = atoi(times_node->value);
+        if (count <= 0) {
+            fprintf(stderr, "SEMANTIC ERROR: REPEAT count must be positive, got %d\n", count);
+            exit(1);
+        }
+        if (count > 1000) {  // Reasonable limit
+            fprintf(stderr, "WARNING: Very high REPEAT count (%d) - are you sure?\n", count);
+        }
+    }
+}
 
 // Enter a new scope
 void enter_scope(){
@@ -228,8 +416,8 @@ void validate_symbol_exists(char* name, const char* context) {
     entry->used = 1;  // Mark as used
 }
 
-// Insert a symbol in the current scope
-void insert_symbol(char* name, symbol_type type) {
+// Insert a symbol in the current scope - ENHANCED for type checking
+void insert_symbol(char* name, symbol_type type, symbol_type data_type) {
     // Ensure global scope exists
     if (!global_recipe_scope) {
         init_recipe_scope();
@@ -267,10 +455,20 @@ void insert_symbol(char* name, symbol_type type) {
     symbol_entry* new_entry = malloc(sizeof(symbol_entry));
     new_entry->name = strdup(name);
     new_entry->type = type;
+    new_entry->data_type = data_type;  // Store the data type
     new_entry->value = NULL;
     new_entry->used = 0;  // Initialize as unused
     new_entry->next = target_scope->symbols;
     target_scope->symbols = new_entry;
+}
+
+// Wrapper for backward compatibility
+void insert_symbol_legacy(char* name, symbol_type type) {
+    symbol_type default_data_type = TYPE_STRING;  // Default fallback
+    if (type == SYMBOL_TOOL || type == SYMBOL_INGREDIENT) {
+        default_data_type = TYPE_STRING;
+    }
+    insert_symbol(name, type, default_data_type);
 }
 
 // Report unused symbols
@@ -363,6 +561,31 @@ void validate_mix_action(char* target) {
     exit(1);
 }
 
+// Enhanced validation for quantities and units
+void validate_quantity_unit_compatibility(int quantity, const char* unit, const char* ingredient) {
+    if (quantity < 0) {
+        fprintf(stderr, "SEMANTIC ERROR: Negative quantity (%d) for ingredient '%s'\n", quantity, ingredient);
+        exit(1);
+    }
+
+    if (quantity == 0) {
+        fprintf(stderr, "WARNING: Zero quantity for ingredient '%s' - are you sure?\n", ingredient);
+    }
+
+    // Add reasonable limits for different units
+    if (strcmp(unit, "g") == 0 && quantity > 10000) {
+        fprintf(stderr, "WARNING: Very large weight (%d g) for ingredient '%s'\n", quantity, ingredient);
+    } else if (strcmp(unit, "L") == 0 && quantity > 100) {
+        fprintf(stderr, "WARNING: Very large volume (%d L) for ingredient '%s'\n", quantity, ingredient);
+    } else if (strcmp(unit, "piece") == 0 && quantity > 1000) {
+        fprintf(stderr, "WARNING: Very large count (%d pieces) for ingredient '%s'\n", quantity, ingredient);
+    }
+
+    if (DEBUG) {
+        printf("Validated: %d %s of %s\n", quantity, unit, ingredient);
+    }
+}
+
 // === SEMANTIC ANALYSIS FUNCTIONS ===
 void analyze_program_semantics(ast_node* node);
 void analyze_recipe_semantics(ast_node* node);
@@ -421,7 +644,7 @@ void analyze_action_semantics(ast_node* node) {
 
             struct symbol_entry* entry = lookup_symbol(item_name);
             if (!entry) {
-                insert_symbol(item_name, SYMBOL_TOOL);
+                insert_symbol_legacy(item_name, SYMBOL_TOOL);
                 printf(" (new tool: %s)\n", item_name);
             } else {
                 entry->used = 1;
@@ -498,12 +721,24 @@ void analyze_action_semantics(ast_node* node) {
         ast_node* variable_node = node->child;
         ast_node* value_node = variable_node->sibling;
 
+        // TYPE CHECKING: Check assignment compatibility
+        if (lookup_symbol(variable_node->value) && value_node) {
+            check_assignment_types(variable_node, value_node);
+        }
+
         if (value_node->type == NODE_IDENTIFIER) {
             validate_symbol_exists(value_node->value, "assignment value");
         }
 
         if (!lookup_symbol(variable_node->value)) {
-            insert_symbol(variable_node->value, SYMBOL_VARIABLE);
+            // Determine data type from value
+            symbol_type data_type = TYPE_STRING;  // default
+            if (value_node->type == NODE_INTEGER) {
+                data_type = TYPE_INT;
+            } else if (value_node->type == NODE_STRING) {
+                data_type = TYPE_STRING;
+            }
+            insert_symbol(variable_node->value, SYMBOL_VARIABLE, data_type);
         }
 
         struct symbol_entry* entry = lookup_symbol(variable_node->value);
@@ -517,7 +752,8 @@ void analyze_action_semantics(ast_node* node) {
         ast_node* condition_node = node->child;
         ast_node* action_list = condition_node->sibling;
 
-        // validate_symbol_exists(condition_node->child->value, "IF condition"); // MODIFIED: now handles expressions
+        // TYPE CHECKING: Check condition types
+        check_condition_types(condition_node);
 
         enter_scope();
         ast_node* current_action = action_list;
@@ -532,7 +768,8 @@ void analyze_action_semantics(ast_node* node) {
         ast_node* condition_node = node->child;
         ast_node* action_list = condition_node->sibling;
 
-        // validate_symbol_exists(condition_node->child->value, "WHILE condition"); // MODIFIED: now handles expressions
+        // TYPE CHECKING: Check condition types
+        check_condition_types(condition_node);
 
         enter_scope();
         ast_node* current_action = action_list;
@@ -546,6 +783,9 @@ void analyze_action_semantics(ast_node* node) {
         printf("     Validating REPEAT loop\n");
         ast_node* times_node = node->child;
         ast_node* action_list = times_node->sibling;
+
+        // TYPE CHECKING: Validate repeat count
+        validate_repeat_count(times_node);
 
         if (times_node->type == NODE_IDENTIFIER) {
             validate_symbol_exists(times_node->value, "REPEAT times");
@@ -584,7 +824,7 @@ void analyze_action_semantics(ast_node* node) {
 %start program
 
 %left AND_OP
-%left EQ_OP NE_OP GT_OP
+%left EQ_OP NE_OP GT_OP LT_OP
 %left ADD_OP SUB_OP
 %left MUL_OP DIV_OP
 %left UMINUS
@@ -687,13 +927,21 @@ repeat_statement:
         ast_node* repeat_node = new_node(NODE_REPEAT, "repeat");
         char num_str[16];
         sprintf(num_str, "%d", $2);
-        repeat_node->child = new_node(NODE_INTEGER, num_str);
+        ast_node* times_node = new_node(NODE_INTEGER, num_str);
+
+        validate_repeat_count(times_node);
+
+        repeat_node->child = times_node;
         repeat_node->child->sibling = $5;
         $$ = repeat_node;
     }
     | REPEAT IDENTIFIER TIMES LBRACE action_list RBRACE {
         ast_node* repeat_node = new_node(NODE_REPEAT, "repeat");
-        repeat_node->child = new_node(NODE_IDENTIFIER, $2);
+        ast_node* times_node = new_node(NODE_IDENTIFIER, $2);
+
+        validate_repeat_count(times_node);
+
+        repeat_node->child = times_node;
         repeat_node->child->sibling = $5;
         $$ = repeat_node;
     }
@@ -715,13 +963,15 @@ action_list:
 
 action:
     GET IDENTIFIER {
-        insert_symbol($2, SYMBOL_TOOL);
+        insert_symbol($2, SYMBOL_TOOL, TYPE_STRING);  // Enhanced with data type
         ast_node* get_node = new_node(NODE_ACTION, "get");
         get_node->child = new_node(NODE_IDENTIFIER, $2);
         $$ = get_node;
     }
     | ADD IDENTIFIER INTEGER_LITERAL G_UNIT TO IDENTIFIER {
-        insert_symbol($2, SYMBOL_INGREDIENT);
+        insert_symbol($2, SYMBOL_INGREDIENT, TYPE_UNIT_WEIGHT);
+        validate_quantity_unit_compatibility($3, "g", $2);
+
         ast_node* add_node = new_node(NODE_ACTION, "add");
         char num_str[16];
         sprintf(num_str, "%d", $3);
@@ -732,7 +982,9 @@ action:
         $$ =add_node;
     }
     | ADD IDENTIFIER INTEGER_LITERAL L_UNIT TO IDENTIFIER {
-        insert_symbol($2, SYMBOL_INGREDIENT);
+        insert_symbol($2, SYMBOL_INGREDIENT, TYPE_UNIT_VOLUME);
+        validate_quantity_unit_compatibility($3, "L", $2);
+
         ast_node* add_node = new_node(NODE_ACTION, "add");
         char num_str[16];
         sprintf(num_str, "%d", $3);
@@ -743,7 +995,9 @@ action:
         $$ =add_node;
     }
     | ADD IDENTIFIER INTEGER_LITERAL P_UNIT TO IDENTIFIER {
-        insert_symbol($2, SYMBOL_INGREDIENT);
+        insert_symbol($2, SYMBOL_INGREDIENT, TYPE_UNIT_PIECE);
+        validate_quantity_unit_compatibility($3, "piece", $2);
+
         ast_node* add_node = new_node(NODE_ACTION, "add");
         char num_str[16];
         sprintf(num_str, "%d", $3);
@@ -754,7 +1008,7 @@ action:
         $$ =add_node;
     }
     | ADD IDENTIFIER TO IDENTIFIER {
-        insert_symbol($2, SYMBOL_INGREDIENT);
+        insert_symbol($2, SYMBOL_INGREDIENT, TYPE_STRING);
         ast_node* add_node = new_node(NODE_ACTION, "add");
         add_node->child = new_node(NODE_IDENTIFIER, $2);
         add_node->child->sibling = new_node(NODE_IDENTIFIER, $4);
@@ -830,6 +1084,7 @@ void print_ast(struct ast_node* node, int level) {
         case NODE_ASSIGNMENT:   type_str = "ASSIGNMENT"; break;
         case NODE_STRING:       type_str = "STRING"; break;
         case NODE_CONDITION:    type_str = "CONDITION"; break;
+        case NODE_EXPRESSION:   type_str = "EXPRESSION"; break;
         case NODE_WHILE:        type_str = "WHILE"; break;
         case NODE_REPEAT:       type_str = "REPEAT"; break;
         default:                type_str = "UNKNOWN"; break;
@@ -874,8 +1129,8 @@ int main(int argc, char **argv) {
         // Check for unused symbols at end of compilation
         check_unused_symbols();
 
-        printf("\n Recipe compiled successfully! No semantic errors found.\n");
-        printf("The recipe is ready to be executed by a cooking runtime.\n");
+        printf("\n ------ Recipe compiled successfully! ------ \n - No semantic errors found.\n");
+        printf("   Type checking passed for all expressions and assignments.\n");
 
     } else {
         printf("COMPILATION FAILED - Fix syntax errors and try again.\n");
