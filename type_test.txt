@@ -4,7 +4,7 @@ recipe Type_Mismatch_Test {
         set a = "123";
         if (a == 123) {
             get pot;
-        }
+        };
     }
 
     step 2 {
@@ -12,7 +12,7 @@ recipe Type_Mismatch_Test {
         set b = 999;
         if (b == "999") {
             get pan;
-        }
+        };
     }
 
     step 3 {
@@ -22,11 +22,11 @@ recipe Type_Mismatch_Test {
 
         if (name == 1) {
             get spoon;
-        }
+        };
 
         if (version == "1") {
             get bowl;
-        }
+        };
     }
 
     step 4 {
