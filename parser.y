@@ -663,6 +663,11 @@ void analyze_action_semantics(ast_node* node) {
                 ast_node* arg4 = arg3->sibling;
                 validate_add_target(arg4->value, "add action with quantity");
                 validate_unit_for_ingredient(arg1->value, arg3->value);
+
+                // Enhanced quantity validation
+                int quantity = atoi(arg2->value);
+                validate_quantity_unit_compatibility(quantity, arg3->value, arg1->value);
+
                 printf(" (%s %s of %s to %s)\n", arg2->value, arg3->value, arg1->value, arg4->value);
             } else {
                 validate_add_target(arg2->value, "add action (simple)");
@@ -737,6 +742,8 @@ void analyze_action_semantics(ast_node* node) {
                 data_type = TYPE_INT;
             } else if (value_node->type == NODE_STRING) {
                 data_type = TYPE_STRING;
+            } else if (value_node->type == NODE_EXPRESSION) {
+                data_type = check_expression_type(value_node);
             }
             insert_symbol(variable_node->value, SYMBOL_VARIABLE, data_type);
         }
@@ -744,7 +751,8 @@ void analyze_action_semantics(ast_node* node) {
         struct symbol_entry* entry = lookup_symbol(variable_node->value);
         if (entry) {
             entry->used = 1;
-            printf("      → Set '%s' = '%s'\n", variable_node->value, value_node->value);
+            printf("      → Set '%s' = '%s'\n", variable_node->value,
+                   value_node->value ? value_node->value : "expression");
         }
 
     } else if (node->type == NODE_IF) {
@@ -754,6 +762,8 @@ void analyze_action_semantics(ast_node* node) {
 
         // TYPE CHECKING: Check condition types
         check_condition_types(condition_node);
+
+        validate_symbol_exists(condition_node->child->value, "IF condition");
 
         enter_scope();
         ast_node* current_action = action_list;
@@ -770,6 +780,8 @@ void analyze_action_semantics(ast_node* node) {
 
         // TYPE CHECKING: Check condition types
         check_condition_types(condition_node);
+
+        validate_symbol_exists(condition_node->child->value, "WHILE condition");
 
         enter_scope();
         ast_node* current_action = action_list;
@@ -830,8 +842,7 @@ void analyze_action_semantics(ast_node* node) {
 %left UMINUS
 
 // === AST NODE TYPES FOR GRAMMAR RULES ===
-%type <node_ptr> program recipe_declaration step_list step_declaration action_list action if_statement condition assignment while_statement repeat_statement
-%type <node_ptr> expression term factor logical_condition relation_condition
+%type <node_ptr> program recipe_declaration step_list step_declaration action_list action if_statement condition assignment while_statement repeat_statement expression term factor statement
 
 %%
 
@@ -877,42 +888,6 @@ if_statement:
     }
     ;
 
-expression:
-    term                               { $$ = $1; }
-    | expression ADD_OP term           { $$ = new_node(NODE_EXPRESSION, "+"); $$->child = $1; $$->child->sibling = $3; }
-    | expression SUB_OP term           { $$ = new_node(NODE_EXPRESSION, "-"); $$->child = $1; $$->child->sibling = $3; }
-    ;
-
-term:
-    factor                             { $$ = $1; }
-    | term MUL_OP factor               { $$ = new_node(NODE_EXPRESSION, "*"); $$->child = $1; $$->child->sibling = $3; }
-    | term DIV_OP factor               { $$ = new_node(NODE_EXPRESSION, "/"); $$->child = $1; $$->child->sibling = $3; }
-    ;
-
-factor:
-    INTEGER_LITERAL                    { char num_str[16]; sprintf(num_str, "%d", $1); $$ = new_node(NODE_INTEGER, num_str); }
-    | IDENTIFIER                       { $$ = new_node(NODE_IDENTIFIER, $1); }
-    | STRING_LITERAL                   { $$ = new_node(NODE_STRING, $1); }
-    | LPAREN expression RPAREN         { $$ = $2; }
-    ;
-
-// Logical and relational condition rules
-condition:
-    logical_condition                  { $$ = $1; }
-    ;
-
-logical_condition:
-    relation_condition                 { $$ = $1; }
-    | logical_condition AND_OP relation_condition { $$ = new_node(NODE_CONDITION, "&&"); $$->child = $1; $$->child->sibling = $3; }
-    ;
-
-relation_condition:
-    expression EQ_OP expression        { $$ = new_node(NODE_CONDITION, "=="); $$->child = $1; $$->child->sibling = $3; }
-    | expression NE_OP expression      { $$ = new_node(NODE_CONDITION, "!="); $$->child = $1; $$->child->sibling = $3; }
-    | expression GT_OP expression      { $$ = new_node(NODE_CONDITION, ">"); $$->child = $1; $$->child->sibling = $3; }
-    | expression LT_OP expression      { $$ = new_node(NODE_CONDITION, "<"); $$->child = $1; $$->child->sibling = $3; }
-    ;
-
 while_statement:
     WHILE LPAREN condition RPAREN LBRACE action_list RBRACE {
         ast_node* while_node = new_node(NODE_WHILE, "while");
@@ -927,28 +902,40 @@ repeat_statement:
         ast_node* repeat_node = new_node(NODE_REPEAT, "repeat");
         char num_str[16];
         sprintf(num_str, "%d", $2);
-        ast_node* times_node = new_node(NODE_INTEGER, num_str);
-
-        validate_repeat_count(times_node);
-
-        repeat_node->child = times_node;
+        repeat_node->child = new_node(NODE_INTEGER, num_str);
         repeat_node->child->sibling = $5;
         $$ = repeat_node;
     }
     | REPEAT IDENTIFIER TIMES LBRACE action_list RBRACE {
         ast_node* repeat_node = new_node(NODE_REPEAT, "repeat");
-        ast_node* times_node = new_node(NODE_IDENTIFIER, $2);
-
-        validate_repeat_count(times_node);
-
-        repeat_node->child = times_node;
+        repeat_node->child = new_node(NODE_IDENTIFIER, $2);
         repeat_node->child->sibling = $5;
         $$ = repeat_node;
     }
     ;
 
 assignment:
-    SET IDENTIFIER ASSIGN expression {
+    SET IDENTIFIER ASSIGN IDENTIFIER {
+        ast_node* assign_node = new_node(NODE_ASSIGNMENT, "assignment");
+        assign_node->child = new_node(NODE_IDENTIFIER, $2);
+        assign_node->child->sibling = new_node(NODE_IDENTIFIER, $4);
+        $$ = assign_node;
+    }
+    | SET IDENTIFIER ASSIGN INTEGER_LITERAL {
+        ast_node* assign_node = new_node(NODE_ASSIGNMENT, "assignment");
+        assign_node->child = new_node(NODE_IDENTIFIER, $2);
+        char num_str[16];
+        sprintf(num_str, "%d", $4);
+        assign_node->child->sibling = new_node(NODE_INTEGER, num_str);
+        $$ = assign_node;
+    }
+    | SET IDENTIFIER ASSIGN STRING_LITERAL {
+        ast_node* assign_node = new_node(NODE_ASSIGNMENT, "assignment");
+        assign_node->child = new_node(NODE_IDENTIFIER, $2);
+        assign_node->child->sibling = new_node(NODE_STRING, $4);
+        $$ = assign_node;
+    }
+    | SET IDENTIFIER ASSIGN expression {
         ast_node* assign_node = new_node(NODE_ASSIGNMENT, "assignment");
         assign_node->child = new_node(NODE_IDENTIFIER, $2);
         assign_node->child->sibling = $4;
@@ -956,9 +943,167 @@ assignment:
     }
     ;
 
+expression:
+    term                              { $$ = $1; }
+    | expression ADD_OP term          {
+        ast_node* plus_node = new_node(NODE_EXPRESSION, "+");
+        plus_node->child = $1;
+        plus_node->child->sibling = $3;
+        $$ = plus_node;
+    }
+    | expression SUB_OP term          {
+        ast_node* minus_node = new_node(NODE_EXPRESSION, "-");
+        minus_node->child = $1;
+        minus_node->child->sibling = $3;
+        $$ = minus_node;
+    }
+    ;
+
+term:
+    factor                            { $$ = $1; }
+    | term MUL_OP factor              {
+        ast_node* mult_node = new_node(NODE_EXPRESSION, "*");
+        mult_node->child = $1;
+        mult_node->child->sibling = $3;
+        $$ = mult_node;
+    }
+    | term DIV_OP factor              {
+        ast_node* div_node = new_node(NODE_EXPRESSION, "/");
+        div_node->child = $1;
+        div_node->child->sibling = $3;
+        $$ = div_node;
+    }
+    ;
+
+factor:
+    IDENTIFIER                        { $$ = new_node(NODE_IDENTIFIER, $1); }
+    | INTEGER_LITERAL                 {
+        char num_str[16];
+        sprintf(num_str, "%d", $1);
+        $$ = new_node(NODE_INTEGER, num_str);
+    }
+    | STRING_LITERAL                  { $$ = new_node(NODE_STRING, $1); }
+    | LPAREN expression RPAREN        { $$ = $2; }
+    ;
+
+condition:
+    IDENTIFIER EQ_OP IDENTIFIER {
+        ast_node* condition_node = new_node(NODE_CONDITION, "condition");
+        condition_node->child = new_node(NODE_IDENTIFIER, $1);
+        condition_node->child->sibling = new_node(NODE_IDENTIFIER, $3);
+        $$ = condition_node;
+    }
+    | IDENTIFIER EQ_OP INTEGER_LITERAL {
+        ast_node* condition_node = new_node(NODE_CONDITION, "condition");
+        condition_node->child = new_node(NODE_IDENTIFIER, $1);
+        char num_str[16];
+        sprintf(num_str, "%d", $3);
+        condition_node->child->sibling = new_node(NODE_INTEGER, num_str);
+        $$ = condition_node;
+    }
+    | IDENTIFIER EQ_OP STRING_LITERAL {
+        ast_node* condition_node = new_node(NODE_CONDITION, "condition");
+        condition_node->child = new_node(NODE_IDENTIFIER, $1);
+        condition_node->child->sibling = new_node(NODE_STRING, $3);
+        $$ = condition_node;
+    }
+    | IDENTIFIER NE_OP IDENTIFIER {
+        ast_node* condition_node = new_node(NODE_CONDITION, "condition");
+        condition_node->child = new_node(NODE_IDENTIFIER, $1);
+        condition_node->child->sibling = new_node(NODE_IDENTIFIER, $3);
+        $$ = condition_node;
+    }
+    | IDENTIFIER NE_OP INTEGER_LITERAL {
+        ast_node* condition_node = new_node(NODE_CONDITION, "condition");
+        condition_node->child = new_node(NODE_IDENTIFIER, $1);
+        char num_str[16];
+        sprintf(num_str, "%d", $3);
+        condition_node->child->sibling = new_node(NODE_INTEGER, num_str);
+        $$ = condition_node;
+    }
+    | IDENTIFIER NE_OP STRING_LITERAL {
+        ast_node* condition_node = new_node(NODE_CONDITION, "condition");
+        condition_node->child = new_node(NODE_IDENTIFIER, $1);
+        condition_node->child->sibling = new_node(NODE_STRING, $3);
+        $$ = condition_node;
+    }
+    | IDENTIFIER GT_OP IDENTIFIER {
+        ast_node* condition_node = new_node(NODE_CONDITION, "condition");
+        condition_node->child = new_node(NODE_IDENTIFIER, $1);
+        condition_node->child->sibling = new_node(NODE_IDENTIFIER, $3);
+        $$ = condition_node;
+    }
+    | IDENTIFIER GT_OP INTEGER_LITERAL {
+        ast_node* condition_node = new_node(NODE_CONDITION, "condition");
+        condition_node->child = new_node(NODE_IDENTIFIER, $1);
+        char num_str[16];
+        sprintf(num_str, "%d", $3);
+        condition_node->child->sibling = new_node(NODE_INTEGER, num_str);
+        $$ = condition_node;
+    }
+    | IDENTIFIER GT_OP STRING_LITERAL {
+        ast_node* condition_node = new_node(NODE_CONDITION, "condition");
+        condition_node->child = new_node(NODE_IDENTIFIER, $1);
+        condition_node->child->sibling = new_node(NODE_STRING, $3);
+        $$ = condition_node;
+    }
+    | IDENTIFIER LT_OP IDENTIFIER {
+        ast_node* condition_node = new_node(NODE_CONDITION, "condition");
+        condition_node->child = new_node(NODE_IDENTIFIER, $1);
+        condition_node->child->sibling = new_node(NODE_IDENTIFIER, $3);
+        $$ = condition_node;
+    }
+    | IDENTIFIER LT_OP INTEGER_LITERAL {
+        ast_node* condition_node = new_node(NODE_CONDITION, "condition");
+        condition_node->child = new_node(NODE_IDENTIFIER, $1);
+        char num_str[16];
+        sprintf(num_str, "%d", $3);
+        condition_node->child->sibling = new_node(NODE_INTEGER, num_str);
+        $$ = condition_node;
+    }
+    | IDENTIFIER LT_OP STRING_LITERAL {
+        ast_node* condition_node = new_node(NODE_CONDITION, "condition");
+        condition_node->child = new_node(NODE_IDENTIFIER, $1);
+        condition_node->child->sibling = new_node(NODE_STRING, $3);
+        $$ = condition_node;
+    }
+    | expression EQ_OP expression {
+        ast_node* condition_node = new_node(NODE_CONDITION, "condition");
+        condition_node->child = $1;
+        condition_node->child->sibling = $3;
+        $$ = condition_node;
+    }
+    | expression NE_OP expression {
+        ast_node* condition_node = new_node(NODE_CONDITION, "condition");
+        condition_node->child = $1;
+        condition_node->child->sibling = $3;
+        $$ = condition_node;
+    }
+    | expression GT_OP expression {
+        ast_node* condition_node = new_node(NODE_CONDITION, "condition");
+        condition_node->child = $1;
+        condition_node->child->sibling = $3;
+        $$ = condition_node;
+    }
+    | expression LT_OP expression {
+        ast_node* condition_node = new_node(NODE_CONDITION, "condition");
+        condition_node->child = $1;
+        condition_node->child->sibling = $3;
+        $$ = condition_node;
+    }
+    | condition AND_OP condition {
+        ast_node* and_node = new_node(NODE_CONDITION, "condition");
+        and_node->child = $1;
+        and_node->child->sibling = $3;
+        $$ = and_node;
+    }
+    ;
+
 action_list:
-    action_list action SEMICOLON { $$ = add_sibling($1, $2); }
-    | action SEMICOLON { $$ = $1; }
+    statement SEMICOLON               { $$ = $1; }
+    | statement                       { $$ = $1; }
+    | action_list statement SEMICOLON { $$ = add_sibling($1, $2); }
+    | action_list statement           { $$ = add_sibling($1, $2); }
     ;
 
 action:
@@ -1056,6 +1201,10 @@ action:
         $$ = serve_node;
     }
     | assignment
+    ;
+
+statement:
+      action
     | if_statement
     | while_statement
     | repeat_statement
