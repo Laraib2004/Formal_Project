@@ -1,14 +1,18 @@
+// Type-checker demonstration.
+// Every 'if' below compares values of incompatible types, so the compiler
+// should report four type errors and finish with COMPILATION FAILED.
+
 recipe Type_Mismatch_Test {
     step 1 {
-        // Caso 1: assegno un numero come stringa e confronto con intero
+        // Case 1: a holds a string, compared against an integer
         set a = "123";
         if (a == 123) {
             get pot;
-        };
+        }
     }
 
     step 2 {
-        // Caso 2: assegno un intero e confronto con stringa numerica
+        // Case 2: b holds an integer, compared against a numeric string
         set b = 999;
         if (b == "999") {
             get pan;
@@ -16,7 +20,7 @@ recipe Type_Mismatch_Test {
     }
 
     step 3 {
-        // Caso 3: confronto stringa e intero incrociati
+        // Case 3: string vs integer, both directions
         set name = "carbonara";
         set version = 1;
 
@@ -30,8 +34,6 @@ recipe Type_Mismatch_Test {
     }
 
     step 4 {
-        // Chiudiamo servendo il piatto
         serve Type_Mismatch_Test;
     }
 }
-

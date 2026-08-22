@@ -1,35 +1,36 @@
-# Define the name of the final executable
-TARGET = compiler
+# Recipe language compiler - build file
+#
+#   make        build the compiler
+#   make run    build and run it on the pasta example
+#   make clean  remove all generated files
 
-# Define the source files
-FLEX_SOURCE = recipe.l
-BISON_SOURCE = parser.y
+TARGET      = compiler
+FLEX_SRC    = recipe.l
+BISON_SRC   = parser.y
+LEXER_C     = lex.yy.c
+PARSER_C    = parser.tab.c
+PARSER_H    = parser.tab.h
 
-# Define the generated C files
-LEXER_C = lex.yy.c
-PARSER_C = parser.tab.c
-PARSER_H = parser.tab.h
-
-# Define compiler and flags
-CC = gcc
+CC     = gcc
 CFLAGS = -Wall -std=gnu99
 
-# The default target that builds the compiler
 all: $(TARGET)
 
-# Rule to link the object files and create the executable
+# noyywrap is set in recipe.l, so libfl is not needed.
 $(TARGET): $(LEXER_C) $(PARSER_C)
-	$(CC) $(CFLAGS) -o $(TARGET) $(LEXER_C) $(PARSER_C) -lfl
+	$(CC) $(CFLAGS) -o $(TARGET) $(LEXER_C) $(PARSER_C)
 
-# Rule to generate the parser C and H files from the bison source
-$(PARSER_C) $(PARSER_H): $(BISON_SOURCE)
-	bison -d -v $(BISON_SOURCE)
+# -d generates parser.tab.h; -v generates parser.output (state machine dump)
+$(PARSER_C) $(PARSER_H): $(BISON_SRC)
+	bison -d -v $(BISON_SRC)
 
-# Rule to generate the lexer C file from the flex source
-# This is the line that was updated!
-$(LEXER_C): $(FLEX_SOURCE) $(PARSER_H)
-	flex $(FLEX_SOURCE)
+$(LEXER_C): $(FLEX_SRC) $(PARSER_H)
+	flex $(FLEX_SRC)
 
-# Clean up generated files
+run: $(TARGET)
+	./$(TARGET) pasta_with_tomatoe_souce.txt
+
 clean:
-	rm -f $(TARGET) $(LEXER_C) $(PARSER_C) $(PARSER_H)
+	rm -f $(TARGET) $(LEXER_C) $(PARSER_C) $(PARSER_H) parser.output
+
+.PHONY: all run clean

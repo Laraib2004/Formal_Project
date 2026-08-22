@@ -17,12 +17,12 @@ recipe Pasta_with_tomato_sauce {
         if (num_of_people == 4) {
             get large_pan;
             add oil 20 g to large_pan;
-        };
+        }
 
         if (sauce_type == "tomato") {
             add garlic 1 p to large_pan;
             add tomato 200 g to large_pan;
-        };
+        }
 
         mix large_pan;
     }

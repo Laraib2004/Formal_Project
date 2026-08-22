@@ -1,1146 +1,856 @@
 %{
+/*
+ * parser.y - Grammar, AST, symbol table and semantic analysis for the
+ *            "Recipe" language.
+ *
+ * Design (deliberately ONE mechanism per job, to avoid duplicated work):
+ *
+ *   1. The lexer turns text into tokens and values (numbers already parsed).
+ *   2. The grammar actions ONLY build an Abstract Syntax Tree. They perform
+ *      no semantic checks - this is a pure translation scheme producing a
+ *      synthesized attribute (the AST node) for every production.
+ *   3. A single tree-walk (analyze_*) does ALL semantic work exactly once:
+ *      symbol-table management with scoping, type checking, constant-value
+ *      computation and "unused symbol" reporting.
+ *
+ * Numbers are stored in the AST as real numeric fields (ival/fval), never
+ * re-stringified, and each action has its own node kind, so the analyser
+ * dispatches on the node kind - it never re-parses a string to rediscover
+ * something the lexer/parser already knew.
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
-// Global debug flag
 #define DEBUG 0
 
-extern int yylex();
+extern int   yylex(void);
+extern int   yylineno;
+extern char *yytext;
 extern FILE *yyin;
-extern int yylineno;
-extern char* yytext;
-int yyparse();
+int yyparse(void);
 
-// Error handling function
-void yyerror(const char *s) {
-    fprintf(stderr, "\n COOKING ERROR at line %d near '%s':\n", yylineno, yytext);
-    fprintf(stderr, "   Problem: %s\n", s);
+int syntax_errors = 0;   /* counted by yyerror */
+int sem_errors    = 0;   /* counted by semantic analysis */
 
-    // Add helpful hints
-    if(strstr(s, "not declared") || strstr(s, "non dichiarata")){
-        fprintf(stderr, "   Fix: Did you forget to 'get' this tool or 'add' this ingredient?\n");
-        fprintf(stderr, "   Common tools: pot, pan, spoon, bowl\n");
+/* =======================================================================
+ *  AST
+ * ======================================================================= */
+typedef enum {
+    NODE_PROGRAM, NODE_RECIPE, NODE_STEP,
+    NODE_GET, NODE_ADD, NODE_COOK, NODE_BOIL, NODE_DRAIN,
+    NODE_MIX, NODE_SERVE, NODE_RETURN,
+    NODE_ASSIGN, NODE_IF, NODE_WHILE, NODE_REPEAT,
+    NODE_ID, NODE_INT, NODE_FLOAT, NODE_STRING, NODE_UNIT,
+    NODE_BINOP, NODE_RELOP
+} node_kind;
+
+/* Operator codes - stored numerically so the analyser never strcmp()s "+" */
+typedef enum {
+    OP_ADD, OP_SUB, OP_MUL, OP_DIV,
+    OP_EQ, OP_NE, OP_GT, OP_LT, OP_AND
+} op_kind;
+
+typedef struct ast_node {
+    node_kind kind;
+    op_kind   op;          /* for NODE_BINOP / NODE_RELOP            */
+    char     *sval;        /* identifier / string / unit text        */
+    long      ival;        /* NODE_INT value                         */
+    double    fval;        /* NODE_FLOAT value                       */
+    int       line;        /* source line, for diagnostics           */
+    struct ast_node *child;
+    struct ast_node *sibling;
+} ast_node;
+
+static ast_node *ast_root = NULL;
+
+static ast_node *mk(node_kind kind) {
+    ast_node *n = calloc(1, sizeof(ast_node));
+    n->kind = kind;
+    n->line = yylineno;
+    return n;
+}
+static ast_node *mk_id(char *s)     { ast_node *n = mk(NODE_ID);     n->sval = s; return n; }
+static ast_node *mk_int(long v)     { ast_node *n = mk(NODE_INT);    n->ival = v; return n; }
+static ast_node *mk_float(double v) { ast_node *n = mk(NODE_FLOAT);  n->fval = v; return n; }
+static ast_node *mk_str(char *s)    { ast_node *n = mk(NODE_STRING); n->sval = s; return n; }
+static ast_node *mk_unit(char *s)   { ast_node *n = mk(NODE_UNIT);   n->sval = s; return n; }
+
+static ast_node *mk_op(node_kind kind, op_kind op, ast_node *l, ast_node *r) {
+    ast_node *n = mk(kind);
+    n->op = op;
+    n->child = l;
+    if (l) l->sibling = r;
+    return n;
+}
+
+/* Append `s` as the last sibling of `list`; returns the (possibly new) head. */
+static ast_node *append(ast_node *list, ast_node *s) {
+    if (!list) return s;
+    ast_node *t = list;
+    while (t->sibling) t = t->sibling;
+    t->sibling = s;
+    return list;
+}
+
+/* =======================================================================
+ *  Types & symbol table (dynamic, with a scope stack)
+ * ======================================================================= */
+typedef enum { T_INT, T_FLOAT, T_STRING, T_BOOL, T_UNKNOWN } data_type;
+typedef enum { SYM_TOOL, SYM_INGREDIENT, SYM_VARIABLE } sym_kind;
+
+typedef struct symbol {
+    char     *name;
+    sym_kind  kind;
+    data_type dtype;      /* for variables            */
+    int       used;
+    /* computed constant value (for value semantics) */
+    int       has_value;
+    long      ival;
+    double    fval;
+    char     *sval;
+    struct symbol *next;
+} symbol;
+
+typedef struct scope {
+    symbol *symbols;
+    struct scope *parent;
+} scope;
+
+static scope *scope_top    = NULL;  /* innermost scope                 */
+static scope *recipe_scope = NULL;  /* recipe-wide scope (tools/ingr.) */
+static char  *current_recipe_name = NULL;
+
+static const char *type_name(data_type t) {
+    switch (t) {
+        case T_INT:    return "integer";
+        case T_FLOAT:  return "float";
+        case T_STRING: return "string";
+        case T_BOOL:   return "boolean";
+        default:       return "unknown";
     }
-    else if(strstr(s, "syntax error")){
-        fprintf(stderr, "   Fix: Check for missing semicolon ';' or closing brace '}'\n");
-        fprintf(stderr, "   Recipe structure: recipe name { step 1 { actions; } }\n");
+}
+static const char *kind_name(sym_kind k) {
+    switch (k) {
+        case SYM_TOOL:       return "Tool";
+        case SYM_INGREDIENT: return "Ingredient";
+        default:             return "Variable";
     }
-    else if(strstr(s, "unexpected")){
-        fprintf(stderr, "   Fix: Check spelling and recipe syntax\n");
-        fprintf(stderr, "   Valid actions: get, add, cook, boil, mix, serve\n");
-    }
-    fprintf(stderr, "   Context: Recipe preparation step\n");
+}
+
+/* Report a semantic error but keep going, so ALL problems are shown. */
+static void sem_error(int line, const char *fmt, ...) {
+    va_list ap;
+    fprintf(stderr, "SEMANTIC ERROR (line %d): ", line);
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "\n");
+    sem_errors++;
+}
+static void sem_warn(int line, const char *fmt, ...) {
+    va_list ap;
+    fprintf(stderr, "warning (line %d): ", line);
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
     fprintf(stderr, "\n");
 }
 
-// === AST DATA STRUCTURES ===
-typedef enum {
-    NODE_PROGRAM,
-    NODE_RECIPE,
-    NODE_STEP,
-    NODE_ACTION,
-    NODE_IDENTIFIER,
-    NODE_INTEGER,
-    NODE_UNIT,
-    NODE_IF,
-    NODE_ASSIGNMENT,
-    NODE_STRING,
-    NODE_CONDITION,
-    NODE_EXPRESSION,
-    NODE_WHILE,
-    NODE_REPEAT,
-    NODE_OPERATOR
-} ast_node_type;
-
-typedef struct ast_node {
-    ast_node_type type;
-    char* value;
-    struct ast_node* child;
-    struct ast_node* sibling;
-} ast_node;
-
-// AST root
-struct ast_node* ast_root = NULL;
-char* current_recipe_name = NULL;
-
-// Create new AST node
-struct ast_node* new_node(ast_node_type type, char* value) {
-    struct ast_node* node = (struct ast_node*)malloc(sizeof(struct ast_node));
-    if (node) {
-        node->type = type;
-        node->value = value ? strdup(value) : NULL;
-        node->child = NULL;
-        node->sibling = NULL;
-    }
-    return node;
+static void push_scope(void) {
+    scope *s = calloc(1, sizeof(scope));
+    s->parent = scope_top;
+    scope_top = s;
 }
 
-// Function to add a sibling to a node
-struct ast_node* add_sibling(struct ast_node* current, struct ast_node* sibling) {
-    if (!current) {
-        return sibling;
-    }
-    struct ast_node* temp = current;
-    while (temp->sibling) {
-        temp = temp->sibling;
-    }
-    temp->sibling = sibling;
-    return current;
+/* Report variables declared in this scope that were never referenced. */
+static void report_unused_vars(scope *s) {
+    for (symbol *e = s->symbols; e; e = e->next)
+        if (e->kind == SYM_VARIABLE && !e->used)
+            sem_warn(0, "variable '%s' was set but never used", e->name);
 }
 
-// === SYMBOL TABLE DEFINITIONS ===
-typedef enum {
-    SYMBOL_INGREDIENT,
-    SYMBOL_TOOL,
-    SYMBOL_VARIABLE,
-    TYPE_INT,   // Type checking additions
-    TYPE_STRING,
-    TYPE_FLOAT,
-    TYPE_UNIT_WEIGHT,
-    TYPE_UNIT_VOLUME,
-    TYPE_UNIT_TIME,
-    TYPE_UNIT_PIECE
-} symbol_type;
-
-typedef struct symbol_entry {
-    char* name;
-    symbol_type type;
-    char* value;
-    int used;  //  Track if symbol is used
-    symbol_type data_type;  // Track the data type for type checking
-    struct symbol_entry* next;
-} symbol_entry;
-
-typedef struct scope {
-    struct symbol_entry* symbols;
-    struct scope* next;
-} scope;
-
-scope* scope_stack = NULL;
-scope* global_recipe_scope = NULL;
-
-// === FORWARD DECLARATIONS ===
-struct symbol_entry* lookup_symbol(char* name);
-void validate_symbol_exists(char* name, const char* context);
-void insert_symbol(char* name, symbol_type type, symbol_type data_type);
-void insert_symbol_legacy(char* name, symbol_type type);
-
-// Forward declarations for type checking functions
-symbol_type get_node_type(ast_node* node);
-symbol_type check_expression_type(ast_node* node);
-const char* get_type_name(symbol_type type);
-int are_types_compatible(symbol_type type1, symbol_type type2);
-void check_assignment_types(ast_node* variable_node, ast_node* value_node);
-void check_condition_types(ast_node* condition_node);
-void validate_repeat_count(ast_node* times_node);
-
-// Get type name for error messages
-const char* get_type_name(symbol_type type) {
-    switch(type) {
-        case TYPE_INT: return "integer";
-        case TYPE_STRING: return "string";
-        case TYPE_FLOAT: return "float";
-        case TYPE_UNIT_WEIGHT: return "weight_unit";
-        case TYPE_UNIT_VOLUME: return "volume_unit";
-        case TYPE_UNIT_TIME: return "time_unit";
-        case TYPE_UNIT_PIECE: return "piece_unit";
-        default: return "unknown";
-    }
-}
-
-// Check type compatibility
-int are_types_compatible(symbol_type type1, symbol_type type2) {
-    // Identical types are always compatible
-    if (type1 == type2) return 1;
-
-    // Allowed implicit conversions
-    if ((type1 == TYPE_INT && type2 == TYPE_FLOAT) ||
-        (type1 == TYPE_FLOAT && type2 == TYPE_INT)) {
-        return 1;
-    }
-
-    // Unit types can be compatible with integers in certain contexts
-    if ((type1 == TYPE_INT && (type2 == TYPE_UNIT_WEIGHT || type2 == TYPE_UNIT_VOLUME ||
-                               type2 == TYPE_UNIT_TIME || type2 == TYPE_UNIT_PIECE)) ||
-        (type2 == TYPE_INT && (type1 == TYPE_UNIT_WEIGHT || type1 == TYPE_UNIT_VOLUME ||
-                               type1 == TYPE_UNIT_TIME || type1 == TYPE_UNIT_PIECE))) {
-        return 1;
-    }
-
-    return 0; // Incompatible types
-}
-
-// Get the type of a node
-symbol_type get_node_type(ast_node* node) {
-    if (!node) {
-        fprintf(stderr, "COMPILER ERROR: Cannot determine type of NULL node\n");
-        exit(1);
-    }
-
-    switch(node->type) {
-        case NODE_INTEGER:
-            return TYPE_INT;
-        case NODE_STRING:
-            return TYPE_STRING;
-        case NODE_EXPRESSION:
-            return check_expression_type(node);
-        case NODE_IDENTIFIER: {
-            symbol_entry* entry = lookup_symbol(node->value);
-            if (!entry) {
-                fprintf(stderr, "TYPE ERROR: Unknown identifier '%s' - cannot determine type\n", node->value);
-                exit(1);
-            }
-            return entry->data_type;
-        }
-        default:
-            fprintf(stderr, "COMPILER ERROR: Cannot determine type for node type %d\n", node->type);
-            exit(1);
-    }
-}
-
-// Check expression type with proper recursion
-symbol_type check_expression_type(ast_node* node) {
-    if (!node) {
-        fprintf(stderr, "COMPILER ERROR: Cannot determine type of NULL expression node\n");
-        exit(1);
-    }
-
-    if (node->type == NODE_EXPRESSION) {
-        ast_node* left = node->child;
-        ast_node* right = node->child ? node->child->sibling : NULL;
-
-        if (!left || !right) {
-            fprintf(stderr, "COMPILER ERROR: Malformed expression node - missing operands\n");
-            exit(1);
-        }
-
-        symbol_type left_type = check_expression_type(left);
-        symbol_type right_type = check_expression_type(right);
-
-        if (!are_types_compatible(left_type, right_type)) {
-            fprintf(stderr, "TYPE ERROR: Cannot perform '%s' operation between %s and %s\n",
-                    node->value ? node->value : "unknown",
-                    get_type_name(left_type),
-                    get_type_name(right_type));
-            exit(1);
-        }
-
-        // Return promoted type
-        if (left_type == TYPE_FLOAT || right_type == TYPE_FLOAT) {
-            return TYPE_FLOAT;
-        }
-        return TYPE_INT;
-    }
-
-    return get_node_type(node);
-}
-
-// Type check for assignments
-void check_assignment_types(ast_node* variable_node, ast_node* value_node) {
-    symbol_type var_type = get_node_type(variable_node);
-    symbol_type val_type = get_node_type(value_node);
-
-    if (!are_types_compatible(var_type, val_type)) {
-        fprintf(stderr, "TYPE ERROR: Cannot assign %s to variable '%s' of type %s\n",
-                get_type_name(val_type), variable_node->value, get_type_name(var_type));
-        exit(1);
-    }
-}
-
-// Check condition types
-void check_condition_types(ast_node* condition_node) {
-    if (!condition_node) return;
-
-    if (condition_node->type == NODE_CONDITION) {
-        ast_node* left = condition_node->child;
-        ast_node* right = condition_node->child->sibling;
-
-        if (!left || !right) {
-            fprintf(stderr, "COMPILER ERROR: Malformed condition node\n");
-            exit(1);
-        }
-
-        symbol_type left_type = check_expression_type(left);
-        symbol_type right_type = check_expression_type(right);
-
-        if (!are_types_compatible(left_type, right_type)) {
-            fprintf(stderr, "TYPE ERROR: Cannot compare %s with %s in condition\n",
-                    get_type_name(left_type), get_type_name(right_type));
-            exit(1);
-        }
-
-        if (DEBUG) {
-            printf("       → Type check passed: comparing %s with %s\n",
-                   get_type_name(left_type), get_type_name(right_type));
-        }
-    }
-}
-
-// Validate repeat count with type checking
-void validate_repeat_count(ast_node* times_node) {
-    symbol_type times_type = get_node_type(times_node);
-
-    if (times_type != TYPE_INT) {
-        fprintf(stderr, "TYPE ERROR: REPEAT count must be integer, got %s\n",
-                get_type_name(times_type));
-        exit(1);
-    }
-
-    // If it's a literal, verify it's positive
-    if (times_node->type == NODE_INTEGER) {
-        int count = atoi(times_node->value);
-        if (count <= 0) {
-            fprintf(stderr, "SEMANTIC ERROR: REPEAT count must be positive, got %d\n", count);
-            exit(1);
-        }
-        if (count > 1000) {  // Reasonable limit
-            fprintf(stderr, "WARNING: Very high REPEAT count (%d) - are you sure?\n", count);
-        }
-    }
-}
-
-// Enter a new scope
-void enter_scope(){
-    scope* new_scope = malloc(sizeof(scope));
-    new_scope->symbols = NULL;
-    new_scope->next = scope_stack;
-    scope_stack = new_scope;
-
-    if (DEBUG) {
-        printf(">>> Entering new local scope\n");
-    }
-}
-
-// Exit a scope
-void exit_scope() {
-    if (!scope_stack) return;
-    scope* old = scope_stack;
-    scope_stack = scope_stack->next;
-
-    // Free symbols
-    symbol_entry* e = old->symbols;
+static void free_symbols(symbol *e) {
     while (e) {
-        symbol_entry* tmp = e;
-        e = e->next;
-        free(tmp->name);
-        if (tmp->value) free(tmp->value);
-        free(tmp);
+        symbol *t = e; e = e->next;
+        free(t->name); free(t->sval); free(t);
     }
+}
+
+static void pop_scope(void) {
+    if (!scope_top) return;
+    scope *old = scope_top;
+    report_unused_vars(old);
+    scope_top = old->parent;
+    free_symbols(old->symbols);
     free(old);
-
-    if (DEBUG) {
-        printf("<<< Exiting scope\n");
-    }
 }
 
-void init_recipe_scope() {
-    if (global_recipe_scope) return; // Already initialized
-
-    global_recipe_scope = malloc(sizeof(scope));
-    global_recipe_scope->symbols = NULL;
-    global_recipe_scope->next = NULL;
-    if (DEBUG) {
-        printf(">>> Initializing global recipe scope\n");
-    }
-}
-
-void cleanup_recipe_scope() {
-    if (!global_recipe_scope) return;
-
-    // Free symbols
-    symbol_entry* e = global_recipe_scope->symbols;
-    while (e) {
-        symbol_entry* tmp = e;
-        e = e->next;
-        free(tmp->name);
-        if (tmp->value) free(tmp->value);
-        free(tmp);
-    }
-    free(global_recipe_scope);
-    global_recipe_scope = NULL;
-    if (DEBUG) {
-        printf("<<< Cleaning up global recipe scope\n");
-    }
-}
-
-struct symbol_entry* lookup_symbol(char* name) {
-    // First check local scope stack
-    for (scope* s = scope_stack; s; s = s->next) {
-        for (symbol_entry* e = s->symbols; e; e = e->next) {
-            if (strcmp(e->name, name) == 0) {
-                if (DEBUG) {
-                    printf("Found '%s' in LOCAL scope\n", name);
-                }
-                return e;
-            }
-        }
-    }
-
-    // Then check global recipe scope
-    if (global_recipe_scope) {
-        for (symbol_entry* e = global_recipe_scope->symbols; e; e = e->next) {
-            if (strcmp(e->name, name) == 0) {
-                if (DEBUG) {
-                    printf("Found '%s' in GLOBAL scope\n", name);
-                }
-                return e;
-            }
-        }
-    }
-
+/* Search the scope stack from innermost outward, then the recipe scope. */
+static symbol *lookup(const char *name) {
+    for (scope *s = scope_top; s; s = s->parent)
+        for (symbol *e = s->symbols; e; e = e->next)
+            if (strcmp(e->name, name) == 0) return e;
     return NULL;
 }
 
-// Function to validate symbol exists and mark as used
-void validate_symbol_exists(char* name, const char* context) {
-    struct symbol_entry* entry = lookup_symbol(name);
-    if (!entry) {
-        fprintf(stderr, "\n COOKING MISTAKE: '%s' not available!\n", name);
-        fprintf(stderr, "   Used in: %s\n", context);
-
-        // Specific hint based on context
-        if (strstr(context, "tool") || strstr(context, "cook") || strstr(context, "boil")) {
-            fprintf(stderr, "   Quick fix: Add 'get %s;' before using it\n", name);
-        }
-        else if (strstr(context, "ingredient") || strstr(context, "add")) {
-            fprintf(stderr, "   Quick fix: Add 'add %s to container;' first\n", name);
-        }
-        else {
-            fprintf(stderr, "   Quick fix: Declare '%s' before using it\n", name);
-        }
-
-        fprintf(stderr, "\n");
-        exit(1);
-    }
-    entry->used = 1;  // Mark as used
+/* Look up a symbol only in the given scope (for redeclaration checks). */
+static symbol *lookup_in(scope *s, const char *name) {
+    for (symbol *e = s->symbols; e; e = e->next)
+        if (strcmp(e->name, name) == 0) return e;
+    return NULL;
 }
 
-// Insert a symbol in the current scope - ENHANCED for type checking
-void insert_symbol(char* name, symbol_type type, symbol_type data_type) {
-    // Ensure global scope exists
-    if (!global_recipe_scope) {
-        init_recipe_scope();
-    }
+/* Insert a symbol. Tools and ingredients live in the recipe-wide scope so
+ * they remain visible across steps; variables live in the current scope. */
+static symbol *insert(const char *name, sym_kind kind, data_type dtype) {
+    scope *target = (kind == SYM_VARIABLE) ? scope_top : recipe_scope;
+    symbol *s = calloc(1, sizeof(symbol));
+    s->name  = strdup(name);
+    s->kind  = kind;
+    s->dtype = dtype;
+    s->next  = target->symbols;
+    target->symbols = s;
+    return s;
+}
 
-    scope* target_scope;
+/* =======================================================================
+ *  Type checking & value computation
+ * ======================================================================= */
+static int is_numeric(data_type t) { return t == T_INT || t == T_FLOAT; }
 
-    // Decide where to put the symbol based on type
-    if(type == SYMBOL_TOOL || type == SYMBOL_INGREDIENT){
-        target_scope = global_recipe_scope;
-    }
-    else {
-        if(!scope_stack){
-            enter_scope();
-        }
-        target_scope = scope_stack;
-    }
+static int compatible(data_type a, data_type b) {
+    if (a == T_UNKNOWN || b == T_UNKNOWN) return 1;  /* error already reported */
+    if (is_numeric(a) && is_numeric(b))   return 1;  /* int/float mix allowed  */
+    return a == b;
+}
 
-    // Check for redeclaration in the target scope
-    for (symbol_entry* e = target_scope->symbols; e; e = e->next) {
-        if (strcmp(e->name, name) == 0) {
-            if (type == SYMBOL_TOOL || type == SYMBOL_INGREDIENT) {
-                printf("Warning: %s '%s' already available (ignoring redeclaration)\n",
-                       (type == SYMBOL_TOOL) ? "Tool" : "Ingredient", name);
-                return;
+/* A computed constant value (used to demonstrate value semantics). */
+typedef struct { data_type type; long i; double f; char *s; int known; } value;
+
+static const char *op_symbol(op_kind op) {
+    switch (op) {
+        case OP_ADD: return "+";  case OP_SUB: return "-";
+        case OP_MUL: return "*";  case OP_DIV: return "/";
+        case OP_EQ:  return "=="; case OP_NE:  return "!=";
+        case OP_GT:  return ">";  case OP_LT:  return "<";
+        case OP_AND: return "&&"; default: return "?";
+    }
+}
+
+/* Determine the type of an expression/condition, reporting type errors. */
+static data_type type_of(ast_node *n) {
+    if (!n) return T_UNKNOWN;
+    switch (n->kind) {
+        case NODE_INT:    return T_INT;
+        case NODE_FLOAT:  return T_FLOAT;
+        case NODE_STRING: return T_STRING;
+        case NODE_ID: {
+            symbol *s = lookup(n->sval);
+            if (!s) {
+                sem_error(n->line, "'%s' is not declared", n->sval);
+                return T_UNKNOWN;
             }
-            else {
-                fprintf(stderr, "ERROR: Variable '%s' already declared.\n", name);
-                return;
+            s->used = 1;
+            if (s->kind != SYM_VARIABLE) {
+                sem_error(n->line, "'%s' is a %s and cannot be used in an expression",
+                          n->sval, kind_name(s->kind));
+                return T_UNKNOWN;
             }
+            return s->dtype;
         }
-    }
-
-    // Create new entry
-    symbol_entry* new_entry = malloc(sizeof(symbol_entry));
-    new_entry->name = strdup(name);
-    new_entry->type = type;
-    new_entry->data_type = data_type;  // Store the data type
-    new_entry->value = NULL;
-    new_entry->used = 0;  // Initialize as unused
-    new_entry->next = target_scope->symbols;
-    target_scope->symbols = new_entry;
-}
-
-// Wrapper for backward compatibility
-void insert_symbol_legacy(char* name, symbol_type type) {
-    symbol_type default_data_type = TYPE_STRING;  // Default fallback
-    if (type == SYMBOL_TOOL || type == SYMBOL_INGREDIENT) {
-        default_data_type = TYPE_STRING;
-    }
-    insert_symbol(name, type, default_data_type);
-}
-
-// Report unused symbols
-void check_unused_symbols() {
-    printf("\n=== KITCHEN EFFICIENCY CHECK ===\n");
-    int found_unused = 0;
-
-    if (global_recipe_scope) {
-        for (symbol_entry* e = global_recipe_scope->symbols; e; e = e->next) {
-            if (!e->used) {
-                printf("Warning: %s '%s' prepared but never used\n",
-                       (e->type == SYMBOL_TOOL) ? "Tool" : "Ingredient", e->name);
-                found_unused = 1;
+        case NODE_BINOP: {
+            data_type l = type_of(n->child);
+            data_type r = type_of(n->child->sibling);
+            if (l == T_UNKNOWN || r == T_UNKNOWN) return T_UNKNOWN;
+            if (l == T_STRING || r == T_STRING) {
+                sem_error(n->line, "cannot apply '%s' to a string", op_symbol(n->op));
+                return T_UNKNOWN;
             }
+            return (l == T_FLOAT || r == T_FLOAT) ? T_FLOAT : T_INT;
         }
-    }
-
-    if (!found_unused) {
-        printf("Perfect! All ingredients and tools were used efficiently!\n");
-    }
-    printf("=====================================\n");
-}
-
-// === SEMANTIC VALIDATION ===
-
-void validate_get_action(char* tool_name) {
-    if (strcmp(tool_name, "pot") == 0 ||
-        strcmp(tool_name, "pan") == 0 ||
-        strcmp(tool_name, "bowl") == 0 ||
-        strcmp(tool_name, "spoon") == 0 ||
-        strcmp(tool_name, "colander") == 0) {
-        // Tool valido
-        return;
-    }
-    fprintf(stderr, "ERROR: Unknown tool '%s'.\n", tool_name);
-    exit(1);
-}
-
-// Validation for 'add'
-void validate_add_target(char* target, const char* context) {
-    if (strcmp(target, "pot") == 0 ||
-        strcmp(target, "pan") == 0 ||
-        strcmp(target, "bowl") == 0) {
-        // Target valido
-        return;
-    }
-    fprintf(stderr, "ERROR: Cannot add to '%s' in %s.\n", target, context);
-    exit(1);
-}
-
-// Validation for ingredient
-void validate_unit_for_ingredient(char* ingredient, char* unit) {
-    if (strcmp(unit, "g") == 0 || strcmp(unit, "kg") == 0 ||
-        strcmp(unit, "ml") == 0 || strcmp(unit, "l") == 0 ||
-        strcmp(unit, "piece") == 0) {
-        // Unità valida
-        return;
-    }
-    fprintf(stderr, "ERROR: Invalid unit '%s' for ingredient '%s'.\n", unit, ingredient);
-    exit(1);
-}
-
-// Validation for coocking
-void validate_cooking_tool(char* tool, const char* cooking_method) {
-    if (strcmp(cooking_method, "boil") == 0 ||
-        strcmp(cooking_method, "fry") == 0 ||
-        strcmp(cooking_method, "cook") == 0) {
-        if (strcmp(tool, "pot") == 0 || strcmp(tool, "pan") == 0) {
-            return; // Valido
+        case NODE_RELOP: {
+            if (n->op == OP_AND) {
+                data_type l = type_of(n->child);
+                data_type r = type_of(n->child->sibling);
+                if (l != T_BOOL || r != T_BOOL)
+                    sem_error(n->line, "'&&' requires boolean conditions on both sides");
+                return T_BOOL;
+            }
+            data_type l = type_of(n->child);
+            data_type r = type_of(n->child->sibling);
+            if (!compatible(l, r))
+                sem_error(n->line, "cannot compare %s with %s",
+                          type_name(l), type_name(r));
+            else if ((n->op == OP_GT || n->op == OP_LT) &&
+                     !(is_numeric(l) && is_numeric(r)) &&
+                     l != T_UNKNOWN && r != T_UNKNOWN)
+                sem_error(n->line, "'%s' requires numeric operands", op_symbol(n->op));
+            return T_BOOL;
         }
-        fprintf(stderr, "ERROR: '%s' is not valid for %s.\n", tool, cooking_method);
-        exit(1);
+        default:
+            return T_UNKNOWN;
     }
 }
 
-// Validation for 'drain'
-void validate_draining_action(char* item, char* tool) {
-    if (strcmp(tool, "colander") != 0) {
-        fprintf(stderr, "ERROR: Need a colander to drain '%s', not '%s'.\n", item, tool);
-        exit(1);
-    }
-}
+static double as_double(value v) { return v.type == T_FLOAT ? v.f : (double)v.i; }
 
-// Validation for 'mix'
-void validate_mix_action(char* target) {
-    if (strcmp(target, "bowl") == 0 || strcmp(target, "pot") == 0) {
-        return;
-    }
-    fprintf(stderr, "ERROR: Cannot mix in '%s'.\n", target);
-    exit(1);
-}
-
-// Enhanced validation for quantities and units
-void validate_quantity_unit_compatibility(int quantity, const char* unit, const char* ingredient) {
-    if (quantity < 0) {
-        fprintf(stderr, "SEMANTIC ERROR: Negative quantity (%d) for ingredient '%s'\n", quantity, ingredient);
-        exit(1);
-    }
-
-    if (quantity == 0) {
-        fprintf(stderr, "WARNING: Zero quantity for ingredient '%s' - are you sure?\n", ingredient);
-    }
-
-    // Add reasonable limits for different units
-    if (strcmp(unit, "g") == 0 && quantity > 10000) {
-        fprintf(stderr, "WARNING: Very large weight (%d g) for ingredient '%s'\n", quantity, ingredient);
-    } else if (strcmp(unit, "L") == 0 && quantity > 100) {
-        fprintf(stderr, "WARNING: Very large volume (%d L) for ingredient '%s'\n", quantity, ingredient);
-    } else if (strcmp(unit, "piece") == 0 && quantity > 1000) {
-        fprintf(stderr, "WARNING: Very large count (%d pieces) for ingredient '%s'\n", quantity, ingredient);
-    }
-
-    if (DEBUG) {
-        printf("Validated: %d %s of %s\n", quantity, unit, ingredient);
-    }
-}
-
-// === SEMANTIC ANALYSIS FUNCTIONS ===
-void analyze_program_semantics(ast_node* node);
-void analyze_recipe_semantics(ast_node* node);
-void analyze_step_semantics(ast_node* node);
-void analyze_action_semantics(ast_node* node);
-
-void analyze_program_semantics(ast_node* node) {
-    if (!node || node->type != NODE_PROGRAM) return;
-
-    printf("\n=== SEMANTIC ANALYSIS RESULTS ===\n");
-    analyze_recipe_semantics(node->child);
-    printf("=================================\n");
-}
-
-void analyze_recipe_semantics(ast_node* node) {
-    if (!node || node->type != NODE_RECIPE) return;
-
-    char* recipe_name = node->child->value;
-    printf(" Analyzing recipe: %s\n", recipe_name);
-
-    // Store recipe name for serve validation
-    current_recipe_name = recipe_name;
-
-    ast_node* current_step = node->child->sibling;
-    while(current_step != NULL) {
-        analyze_step_semantics(current_step);
-        current_step = current_step->sibling;
-    }
-}
-
-void analyze_step_semantics(ast_node* node) {
-    if (!node || node->type != NODE_STEP) return;
-
-    printf("  Analyzing Step %s\n", node->value);
-    enter_scope();
-
-    ast_node* current_action = node->child;
-    while(current_action != NULL) {
-        analyze_action_semantics(current_action);
-        current_action = current_action->sibling;
-    }
-
-    exit_scope();
-}
-
-void analyze_action_semantics(ast_node* node) {
-    if (!node) return;
-
-    if (node->type == NODE_ACTION) {
-        printf("    Validating action: %s", node->value);
-
-        // Perform all semantic validations
-        if (strcmp(node->value, "get") == 0) {
-            char* item_name = node->child->value;
-            validate_get_action(item_name);
-
-            struct symbol_entry* entry = lookup_symbol(item_name);
-            if (!entry) {
-                insert_symbol_legacy(item_name, SYMBOL_TOOL);
-                printf(" (new tool: %s)\n", item_name);
+/* Fold an expression to a constant value where every operand is known. */
+static value eval(ast_node *n) {
+    value v = {0}; v.known = 0;
+    if (!n) return v;
+    switch (n->kind) {
+        case NODE_INT:    v.type = T_INT;    v.i = n->ival; v.known = 1; return v;
+        case NODE_FLOAT:  v.type = T_FLOAT;  v.f = n->fval; v.known = 1; return v;
+        case NODE_STRING: v.type = T_STRING; v.s = n->sval; v.known = 1; return v;
+        case NODE_ID: {
+            symbol *s = lookup(n->sval);
+            if (s && s->has_value) {
+                v.type = s->dtype; v.i = s->ival; v.f = s->fval; v.s = s->sval; v.known = 1;
+            }
+            return v;
+        }
+        case NODE_BINOP: {
+            value a = eval(n->child);
+            value b = eval(n->child->sibling);
+            if (!a.known || !b.known || a.type == T_STRING || b.type == T_STRING) return v;
+            if (a.type == T_FLOAT || b.type == T_FLOAT) {
+                double x = as_double(a), y = as_double(b);
+                if (n->op == OP_DIV && y == 0.0) {
+                    sem_error(n->line, "division by zero"); return v;
+                }
+                v.type = T_FLOAT; v.known = 1;
+                switch (n->op) {
+                    case OP_ADD: v.f = x + y; break;
+                    case OP_SUB: v.f = x - y; break;
+                    case OP_MUL: v.f = x * y; break;
+                    case OP_DIV: v.f = x / y; break;
+                    default: v.known = 0;
+                }
             } else {
-                entry->used = 1;
-                printf(" (existing tool: %s)\n", item_name);
+                long x = a.i, y = b.i;
+                if (n->op == OP_DIV && y == 0) {
+                    sem_error(n->line, "division by zero"); return v;
+                }
+                v.type = T_INT; v.known = 1;
+                switch (n->op) {
+                    case OP_ADD: v.i = x + y; break;
+                    case OP_SUB: v.i = x - y; break;
+                    case OP_MUL: v.i = x * y; break;
+                    case OP_DIV: v.i = x / y; break;
+                    default: v.known = 0;
+                }
             }
+            return v;
+        }
+        default:
+            return v;
+    }
+}
 
-        } else if (strcmp(node->value, "add") == 0) {
-            ast_node* arg1 = node->child;
-            ast_node* arg2 = arg1->sibling;
+static void print_value(value v) {
+    if      (v.type == T_INT)    printf("%ld", v.i);
+    else if (v.type == T_FLOAT)  printf("%g", v.f);
+    else if (v.type == T_STRING) printf("%s", v.s);
+}
 
-            struct symbol_entry* entry = lookup_symbol(arg1->value);
-            if (entry) entry->used = 1;
+/* =======================================================================
+ *  Semantic analysis (single pass over the AST)
+ * ======================================================================= */
+static void analyze_stmt_list(ast_node *first);
 
-            if (arg2->type == NODE_INTEGER) {
-                ast_node* arg3 = arg2->sibling;
-                ast_node* arg4 = arg3->sibling;
-                validate_add_target(arg4->value, "add action with quantity");
-                validate_unit_for_ingredient(arg1->value, arg3->value);
-                printf(" (%s %s of %s to %s)\n", arg2->value, arg3->value, arg1->value, arg4->value);
-            } else {
-                validate_add_target(arg2->value, "add action (simple)");
-                printf(" (%s to %s)\n", arg1->value, arg2->value);
-            }
+/* Require that a name refers to an already-declared symbol; mark it used. */
+static symbol *require_symbol(ast_node *id, const char *role) {
+    symbol *s = lookup(id->sval);
+    if (!s) {
+        sem_error(id->line, "%s '%s' is not declared - did you 'get' or 'add' it first?",
+                  role, id->sval);
+        return NULL;
+    }
+    s->used = 1;
+    return s;
+}
 
-        } else if (strcmp(node->value, "cook") == 0) {
-            ast_node* arg1 = node->child;
-            ast_node* arg2 = arg1->sibling;
-            ast_node* arg3 = arg2->sibling;
-            ast_node* arg4 = arg3->sibling;
+static void analyze_stmt(ast_node *n) {
+    switch (n->kind) {
 
-            validate_symbol_exists(arg1->value, "cook action (ingredient)");
-            validate_cooking_tool(arg2->value, "cook");
-            printf(" (%s in %s for %s %s)\n", arg1->value, arg2->value, arg3->value, arg4->value);
+    case NODE_GET: {                       /* get tool                  */
+        ast_node *tool = n->child;
+        if (lookup_in(recipe_scope, tool->sval))
+            sem_warn(n->line, "tool '%s' already prepared (ignoring)", tool->sval);
+        else
+            insert(tool->sval, SYM_TOOL, T_UNKNOWN);
+        break;
+    }
 
-        } else if (strcmp(node->value, "boil") == 0) {
-            ast_node* arg1 = node->child;
-            ast_node* arg2 = arg1->sibling;
-            ast_node* arg3 = arg2->sibling;
-            ast_node* arg4 = arg3->sibling;
-
-            validate_symbol_exists(arg1->value, "boil action (ingredient)");
-            validate_cooking_tool(arg2->value, "boil");
-            printf(" (%s in %s for %s %s)\n", arg1->value, arg2->value, arg3->value, arg4->value);
-
-        } else if (strcmp(node->value, "drain") == 0) {
-            ast_node* arg1 = node->child;
-            ast_node* arg2 = arg1->sibling;
-            validate_draining_action(arg1->value, arg2->value);
-            printf(" (%s using %s)\n", arg1->value, arg2->value);
-
-        } else if (strcmp(node->value, "mix") == 0) {
-            char* target = node->child->value;
-            validate_mix_action(target);
-            printf(" (%s)\n", target);
-
-        } else if (strcmp(node->value, "return") == 0) {
-            validate_symbol_exists(node->child->value, "return statement");
-            printf(" (%s)\n", node->child->value);
-
-        } else if (strcmp(node->value, "serve") == 0) {
-            char* serve_target = node->child->value;
-            if (current_recipe_name && strcmp(serve_target, current_recipe_name) == 0) {
-                printf(" (final dish: %s)\n", serve_target);
-            } else {
-                validate_symbol_exists(serve_target, "serve action");
-                printf(" (dish: %s)\n", serve_target);
-            }
+    case NODE_ADD: {                       /* add ingr [qty unit] to container */
+        ast_node *ingr = n->child;
+        ast_node *next = ingr->sibling;
+        ast_node *container;
+        if (next->kind == NODE_INT || next->kind == NODE_FLOAT) {
+            ast_node *qty = next;
+            container = qty->sibling->sibling;      /* skip qty and unit */
+            double q = (qty->kind == NODE_INT) ? (double)qty->ival : qty->fval;
+            if (q < 0)  sem_error(qty->line, "negative quantity for '%s'", ingr->sval);
+            if (q == 0) sem_warn(qty->line, "zero quantity for '%s'", ingr->sval);
         } else {
-            printf("\n");
+            container = next;
         }
+        /* The container must be a tool that was already obtained. */
+        symbol *c = lookup(container->sval);
+        if (!c)                       sem_error(container->line,
+                                          "cannot add to '%s': it was never obtained with 'get'",
+                                          container->sval);
+        else                          c->used = 1;
+        /* Declare the ingredient (once) in the recipe scope. */
+        if (!lookup_in(recipe_scope, ingr->sval))
+            insert(ingr->sval, SYM_INGREDIENT, T_UNKNOWN);
+        break;
+    }
 
-    } else if (node->type == NODE_ASSIGNMENT) {
-        printf("    Validating assignment\n");
-        ast_node* variable_node = node->child;
-        ast_node* value_node = variable_node->sibling;
+    case NODE_COOK:
+    case NODE_BOIL: {                      /* cook/boil ingr in tool N min */
+        ast_node *ingr = n->child;
+        ast_node *tool = ingr->sibling;
+        require_symbol(ingr, "ingredient");
+        require_symbol(tool, "tool");
+        break;
+    }
 
-        // TYPE CHECKING: Check assignment compatibility
-        if (lookup_symbol(variable_node->value) && value_node) {
-            check_assignment_types(variable_node, value_node);
+    case NODE_DRAIN: {                     /* drain item tool           */
+        require_symbol(n->child, "ingredient");
+        require_symbol(n->child->sibling, "tool");
+        break;
+    }
+
+    case NODE_MIX:                          /* mix tool                  */
+        require_symbol(n->child, "tool");
+        break;
+
+    case NODE_RETURN:                       /* return item               */
+        require_symbol(n->child, "item");
+        break;
+
+    case NODE_SERVE: {                      /* serve dish                */
+        ast_node *dish = n->child;
+        if (current_recipe_name && strcmp(dish->sval, current_recipe_name) == 0)
+            break;                          /* serving the finished recipe */
+        require_symbol(dish, "dish");
+        break;
+    }
+
+    case NODE_ASSIGN: {                     /* set var = expression      */
+        ast_node *var  = n->child;
+        ast_node *expr = var->sibling;
+        data_type et = type_of(expr);       /* type-checks the expression */
+        value     ev = eval(expr);          /* computes a value if constant */
+
+        symbol *s = lookup(var->sval);
+        if (s && s->kind == SYM_VARIABLE) {
+            if (!compatible(s->dtype, et))
+                sem_error(n->line, "cannot assign %s to variable '%s' of type %s",
+                          type_name(et), var->sval, type_name(s->dtype));
+            s->dtype = et;
+        } else if (s) {
+            sem_error(n->line, "'%s' is a %s and cannot be assigned to",
+                      var->sval, kind_name(s->kind));
+            break;
+        } else {
+            s = insert(var->sval, SYM_VARIABLE, et);
         }
-
-        if (value_node->type == NODE_IDENTIFIER) {
-            validate_symbol_exists(value_node->value, "assignment value");
+        /* Record the computed constant value on the symbol. */
+        s->has_value = ev.known;
+        if (ev.known) {
+            s->dtype = ev.type; s->ival = ev.i; s->fval = ev.f;
+            free(s->sval); s->sval = ev.s ? strdup(ev.s) : NULL;
         }
+        printf("  set %s (%s)", var->sval, type_name(s->dtype));
+        if (ev.known) { printf(" = "); print_value(ev); }
+        printf("\n");
+        break;
+    }
 
-        if (!lookup_symbol(variable_node->value)) {
-            // Determine data type from value
-            symbol_type data_type = TYPE_STRING;  // default
-            if (value_node->type == NODE_INTEGER) {
-                data_type = TYPE_INT;
-            } else if (value_node->type == NODE_STRING) {
-                data_type = TYPE_STRING;
-            }
-            insert_symbol(variable_node->value, SYMBOL_VARIABLE, data_type);
+    case NODE_IF:
+    case NODE_WHILE: {                      /* if/while (cond) { ... }   */
+        ast_node *cond = n->child;
+        ast_node *body = cond->sibling;
+        if (type_of(cond) != T_BOOL)
+            sem_error(cond->line, "condition must be a comparison");
+        push_scope();
+        analyze_stmt_list(body);
+        pop_scope();
+        break;
+    }
+
+    case NODE_REPEAT: {                     /* repeat N times { ... }    */
+        ast_node *count = n->child;
+        ast_node *body  = count->sibling;
+        if (count->kind == NODE_ID) {
+            symbol *s = require_symbol(count, "loop count");
+            if (s && s->kind == SYM_VARIABLE && s->dtype != T_INT)
+                sem_error(count->line, "repeat count '%s' must be an integer", count->sval);
+        } else if (count->ival <= 0) {
+            sem_error(count->line, "repeat count must be positive, got %ld", count->ival);
         }
+        push_scope();
+        analyze_stmt_list(body);
+        pop_scope();
+        break;
+    }
 
-        struct symbol_entry* entry = lookup_symbol(variable_node->value);
-        if (entry) {
-            entry->used = 1;
-            printf("      → Set '%s' = '%s'\n", variable_node->value, value_node->value);
-        }
-
-    } else if (node->type == NODE_IF) {
-        printf("     Validating IF statement\n");
-        ast_node* condition_node = node->child;
-        ast_node* action_list = condition_node->sibling;
-
-        // TYPE CHECKING: Check condition types
-        check_condition_types(condition_node);
-
-        enter_scope();
-        ast_node* current_action = action_list;
-        while(current_action != NULL) {
-            analyze_action_semantics(current_action);
-            current_action = current_action->sibling;
-        }
-        exit_scope();
-
-    } else if (node->type == NODE_WHILE) {
-        printf("     Validating WHILE loop\n");
-        ast_node* condition_node = node->child;
-        ast_node* action_list = condition_node->sibling;
-
-        // TYPE CHECKING: Check condition types
-        check_condition_types(condition_node);
-
-        enter_scope();
-        ast_node* current_action = action_list;
-        while(current_action != NULL) {
-            analyze_action_semantics(current_action);
-            current_action = current_action->sibling;
-        }
-        exit_scope();
-
-    } else if (node->type == NODE_REPEAT) {
-        printf("     Validating REPEAT loop\n");
-        ast_node* times_node = node->child;
-        ast_node* action_list = times_node->sibling;
-
-        // TYPE CHECKING: Validate repeat count
-        validate_repeat_count(times_node);
-
-        if (times_node->type == NODE_IDENTIFIER) {
-            validate_symbol_exists(times_node->value, "REPEAT times");
-        }
-
-        enter_scope();
-        ast_node* current_action = action_list;
-        while(current_action != NULL) {
-            analyze_action_semantics(current_action);
-            current_action = current_action->sibling;
-        }
-        exit_scope();
+    default:
+        break;
     }
 }
 
+static void analyze_stmt_list(ast_node *first) {
+    for (ast_node *s = first; s; s = s->sibling)
+        analyze_stmt(s);
+}
+
+static void analyze_step(ast_node *step) {
+    /* Steps do not open a new scope: step-level variables belong to the
+     * recipe so later steps can read them. Only if/while/repeat blocks
+     * introduce nested scopes (demonstrating the scoping mechanism). */
+    printf("Step %ld:\n", step->ival);
+    analyze_stmt_list(step->child);
+}
+
+static void analyze_recipe(ast_node *recipe) {
+    ast_node *name = recipe->child;
+    current_recipe_name = name->sval;
+    printf("\n=== Analysing recipe: %s ===\n", name->sval);
+
+    push_scope();
+    recipe_scope = scope_top;          /* tools & ingredients live here */
+
+    for (ast_node *step = name->sibling; step; step = step->sibling)
+        analyze_step(step);
+
+    /* Report tools/ingredients that were prepared but never used. */
+    printf("--- Kitchen efficiency check ---\n");
+    int any = 0;
+    for (symbol *e = recipe_scope->symbols; e; e = e->next)
+        if (!e->used) {
+            sem_warn(0, "%s '%s' was prepared but never used", kind_name(e->kind), e->name);
+            any = 1;
+        }
+    if (!any) printf("All tools and ingredients were used.\n");
+
+    pop_scope();
+    recipe_scope = NULL;
+}
+
+static void analyze_program(ast_node *prog) {
+    if (!prog) return;
+    for (ast_node *r = prog->child; r; r = r->sibling)
+        analyze_recipe(r);
+}
+
+/* =======================================================================
+ *  AST printer (for demonstration)
+ * ======================================================================= */
+static const char *node_name(node_kind k) {
+    switch (k) {
+        case NODE_PROGRAM: return "PROGRAM"; case NODE_RECIPE: return "RECIPE";
+        case NODE_STEP: return "STEP";       case NODE_GET: return "GET";
+        case NODE_ADD: return "ADD";         case NODE_COOK: return "COOK";
+        case NODE_BOIL: return "BOIL";       case NODE_DRAIN: return "DRAIN";
+        case NODE_MIX: return "MIX";         case NODE_SERVE: return "SERVE";
+        case NODE_RETURN: return "RETURN";   case NODE_ASSIGN: return "ASSIGN";
+        case NODE_IF: return "IF";           case NODE_WHILE: return "WHILE";
+        case NODE_REPEAT: return "REPEAT";   case NODE_ID: return "ID";
+        case NODE_INT: return "INT";         case NODE_FLOAT: return "FLOAT";
+        case NODE_STRING: return "STRING";   case NODE_UNIT: return "UNIT";
+        case NODE_BINOP: return "BINOP";     case NODE_RELOP: return "RELOP";
+        default: return "?";
+    }
+}
+static void print_ast(ast_node *n, int depth) {
+    if (!n) return;
+    for (int i = 0; i < depth; i++) printf("  ");
+    printf("%s", node_name(n->kind));
+    switch (n->kind) {
+        case NODE_INT:   printf(" %ld", n->ival); break;
+        case NODE_FLOAT: printf(" %g",  n->fval); break;
+        case NODE_BINOP:
+        case NODE_RELOP: printf(" '%s'", op_symbol(n->op)); break;
+        default: if (n->sval) printf(" '%s'", n->sval);
+    }
+    printf("\n");
+    print_ast(n->child, depth + 1);
+    print_ast(n->sibling, depth);
+}
+
+void yyerror(const char *s) {
+    fprintf(stderr, "SYNTAX ERROR (line %d) near '%s': %s\n",
+            yylineno, (yytext && *yytext) ? yytext : "end of input", s);
+    syntax_errors++;
+}
 %}
 
-// === UNION & TOKENS ===
+/* =======================================================================
+ *  Tokens & precedence
+ * ======================================================================= */
 %union {
-    int int_val;
+    long   int_val;
     double double_val;
-    char* string_val;
-    struct ast_node* node_ptr;
+    char  *string_val;
+    struct ast_node *node;
 }
 
 %token <string_val> IDENTIFIER STRING_LITERAL
-%token <int_val> INTEGER_LITERAL
+%token <int_val>    INTEGER_LITERAL
 %token <double_val> FLOAT_LITERAL
+
 %token RECIPE STEP GET ADD TO COOK IN RETURN BOIL DRAIN MIX SERVE
 %token L_UNIT G_UNIT P_UNIT MIN_UNIT
-%token LBRACE RBRACE SEMICOLON
-%token IF LPAREN RPAREN EQ_OP NE_OP GT_OP LT_OP AND_OP ADD_OP SUB_OP MUL_OP DIV_OP
-%token WHILE REPEAT TIMES
-%token SET ASSIGN
-
-%start program
+%token LBRACE RBRACE SEMICOLON LPAREN RPAREN
+%token IF WHILE REPEAT TIMES SET
+%token ASSIGN EQ_OP NE_OP GT_OP LT_OP AND_OP ADD_OP SUB_OP MUL_OP DIV_OP
 
 %left AND_OP
 %left EQ_OP NE_OP GT_OP LT_OP
 %left ADD_OP SUB_OP
 %left MUL_OP DIV_OP
-%left UMINUS
 
-// === AST NODE TYPES FOR GRAMMAR RULES ===
-%type <node_ptr> program recipe_declaration step_list step_declaration action_list action if_statement condition assignment while_statement repeat_statement
-%type <node_ptr> expression term factor logical_condition relation_condition
+%type <node> program recipe_list recipe step_list step
+%type <node> stmt_list stmt simple_stmt block
+%type <node> get_stmt add_stmt cook_stmt boil_stmt drain_stmt mix_stmt
+%type <node> serve_stmt return_stmt assignment if_stmt while_stmt repeat_stmt
+%type <node> condition expression term factor number unit
+
+%start program
 
 %%
 
-/* Grammar rules with semantic actions */
-
+/* ----- Program: one or more recipes ----- */
 program:
-    recipe_declaration {
-        ast_root = new_node(NODE_PROGRAM, NULL);
-        ast_root->child = $1;
-    }
+    recipe_list { ast_root = mk(NODE_PROGRAM); ast_root->child = $1; $$ = ast_root; }
     ;
 
-recipe_declaration:
+recipe_list:
+      recipe_list recipe { $$ = append($1, $2); }
+    | recipe             { $$ = $1; }
+    ;
+
+recipe:
     RECIPE IDENTIFIER LBRACE step_list RBRACE {
-        ast_node* id_node = new_node(NODE_IDENTIFIER, $2);
-        ast_node* recipe_node = new_node(NODE_RECIPE, "recipe");
-        recipe_node->child = add_sibling(id_node, $4);
-        $$ = recipe_node;
+        ast_node *r = mk(NODE_RECIPE);
+        ast_node *name = mk_id($2);
+        name->sibling = $4;      /* steps follow the name */
+        r->child = name;
+        $$ = r;
     }
     ;
 
 step_list:
-    step_list step_declaration { $$ = add_sibling($1, $2); }
-    | step_declaration         { $$ = $1; }
+      step_list step { $$ = append($1, $2); }
+    | step           { $$ = $1; }
     ;
 
-step_declaration:
-    STEP INTEGER_LITERAL LBRACE action_list RBRACE {
-        char num_str[16];
-        sprintf(num_str, "%d", $2);
-        ast_node* step_node = new_node(NODE_STEP, num_str);
-        step_node->child = $4;
-        $$ = step_node;
+step:
+    STEP INTEGER_LITERAL LBRACE stmt_list RBRACE {
+        ast_node *s = mk(NODE_STEP);
+        s->ival = $2;            /* step number kept as a real number */
+        s->child = $4;
+        $$ = s;
     }
     ;
 
-if_statement:
-    IF LPAREN condition RPAREN LBRACE action_list RBRACE {
-        ast_node* if_node = new_node(NODE_IF, "if");
-        if_node->child = $3; // The condition node
-        if_node->child->sibling = $6; // The action list
-        $$ = if_node;
+/* ----- Statements ----- */
+stmt_list:
+      stmt_list stmt { $$ = append($1, $2); }
+    | /* empty */    { $$ = NULL; }
+    ;
+
+/* Simple statements end with ';'. Block statements (if/while/repeat) do not.
+ * `error SEMICOLON` lets the parser recover and keep reporting problems. */
+stmt:
+      simple_stmt SEMICOLON { $$ = $1; }
+    | if_stmt               { $$ = $1; }
+    | while_stmt            { $$ = $1; }
+    | repeat_stmt           { $$ = $1; }
+    | error SEMICOLON       { yyerrok; $$ = NULL; }
+    ;
+
+simple_stmt:
+      get_stmt | add_stmt | cook_stmt | boil_stmt | drain_stmt
+    | mix_stmt | serve_stmt | return_stmt | assignment
+    ;
+
+get_stmt:
+    GET IDENTIFIER {
+        ast_node *n = mk(NODE_GET); n->child = mk_id($2); $$ = n;
     }
     ;
 
-expression:
-    term                               { $$ = $1; }
-    | expression ADD_OP term           { $$ = new_node(NODE_EXPRESSION, "+"); $$->child = $1; $$->child->sibling = $3; }
-    | expression SUB_OP term           { $$ = new_node(NODE_EXPRESSION, "-"); $$->child = $1; $$->child->sibling = $3; }
+add_stmt:
+      ADD IDENTIFIER number unit TO IDENTIFIER {
+        ast_node *n = mk(NODE_ADD);
+        n->child = mk_id($2);
+        n->child->sibling = $3;                         /* quantity   */
+        n->child->sibling->sibling = $4;                /* unit       */
+        n->child->sibling->sibling->sibling = mk_id($6);/* container  */
+        $$ = n;
+      }
+    | ADD IDENTIFIER TO IDENTIFIER {
+        ast_node *n = mk(NODE_ADD);
+        n->child = mk_id($2);
+        n->child->sibling = mk_id($4);
+        $$ = n;
+      }
     ;
 
-term:
-    factor                             { $$ = $1; }
-    | term MUL_OP factor               { $$ = new_node(NODE_EXPRESSION, "*"); $$->child = $1; $$->child->sibling = $3; }
-    | term DIV_OP factor               { $$ = new_node(NODE_EXPRESSION, "/"); $$->child = $1; $$->child->sibling = $3; }
-    ;
-
-factor:
-    INTEGER_LITERAL                    { char num_str[16]; sprintf(num_str, "%d", $1); $$ = new_node(NODE_INTEGER, num_str); }
-    | IDENTIFIER                       { $$ = new_node(NODE_IDENTIFIER, $1); }
-    | STRING_LITERAL                   { $$ = new_node(NODE_STRING, $1); }
-    | LPAREN expression RPAREN         { $$ = $2; }
-    ;
-
-// Logical and relational condition rules
-condition:
-    logical_condition                  { $$ = $1; }
-    ;
-
-logical_condition:
-    relation_condition                 { $$ = $1; }
-    | logical_condition AND_OP relation_condition { $$ = new_node(NODE_CONDITION, "&&"); $$->child = $1; $$->child->sibling = $3; }
-    ;
-
-relation_condition:
-    expression EQ_OP expression        { $$ = new_node(NODE_CONDITION, "=="); $$->child = $1; $$->child->sibling = $3; }
-    | expression NE_OP expression      { $$ = new_node(NODE_CONDITION, "!="); $$->child = $1; $$->child->sibling = $3; }
-    | expression GT_OP expression      { $$ = new_node(NODE_CONDITION, ">"); $$->child = $1; $$->child->sibling = $3; }
-    | expression LT_OP expression      { $$ = new_node(NODE_CONDITION, "<"); $$->child = $1; $$->child->sibling = $3; }
-    ;
-
-while_statement:
-    WHILE LPAREN condition RPAREN LBRACE action_list RBRACE {
-        ast_node* while_node = new_node(NODE_WHILE, "while");
-        while_node->child = $3;
-        while_node->child->sibling = $6;
-        $$ = while_node;
+cook_stmt:
+    COOK IDENTIFIER IN IDENTIFIER number MIN_UNIT {
+        ast_node *n = mk(NODE_COOK);
+        n->child = mk_id($2);
+        n->child->sibling = mk_id($4);
+        n->child->sibling->sibling = $5;
+        n->child->sibling->sibling->sibling = mk_unit("min");
+        $$ = n;
     }
     ;
 
-repeat_statement:
-    REPEAT INTEGER_LITERAL TIMES LBRACE action_list RBRACE {
-        ast_node* repeat_node = new_node(NODE_REPEAT, "repeat");
-        char num_str[16];
-        sprintf(num_str, "%d", $2);
-        ast_node* times_node = new_node(NODE_INTEGER, num_str);
-
-        validate_repeat_count(times_node);
-
-        repeat_node->child = times_node;
-        repeat_node->child->sibling = $5;
-        $$ = repeat_node;
+boil_stmt:
+    BOIL IDENTIFIER IN IDENTIFIER number MIN_UNIT {
+        ast_node *n = mk(NODE_BOIL);
+        n->child = mk_id($2);
+        n->child->sibling = mk_id($4);
+        n->child->sibling->sibling = $5;
+        n->child->sibling->sibling->sibling = mk_unit("min");
+        $$ = n;
     }
-    | REPEAT IDENTIFIER TIMES LBRACE action_list RBRACE {
-        ast_node* repeat_node = new_node(NODE_REPEAT, "repeat");
-        ast_node* times_node = new_node(NODE_IDENTIFIER, $2);
+    ;
 
-        validate_repeat_count(times_node);
-
-        repeat_node->child = times_node;
-        repeat_node->child->sibling = $5;
-        $$ = repeat_node;
+drain_stmt:
+    DRAIN IDENTIFIER IDENTIFIER {
+        ast_node *n = mk(NODE_DRAIN);
+        n->child = mk_id($2);
+        n->child->sibling = mk_id($3);
+        $$ = n;
     }
+    ;
+
+mix_stmt:
+    MIX IDENTIFIER { ast_node *n = mk(NODE_MIX); n->child = mk_id($2); $$ = n; }
+    ;
+
+serve_stmt:
+    SERVE IDENTIFIER { ast_node *n = mk(NODE_SERVE); n->child = mk_id($2); $$ = n; }
+    ;
+
+return_stmt:
+    RETURN IDENTIFIER { ast_node *n = mk(NODE_RETURN); n->child = mk_id($2); $$ = n; }
     ;
 
 assignment:
     SET IDENTIFIER ASSIGN expression {
-        ast_node* assign_node = new_node(NODE_ASSIGNMENT, "assignment");
-        assign_node->child = new_node(NODE_IDENTIFIER, $2);
-        assign_node->child->sibling = $4;
-        $$ = assign_node;
+        ast_node *n = mk(NODE_ASSIGN);
+        n->child = mk_id($2);
+        n->child->sibling = $4;
+        $$ = n;
     }
     ;
 
-action_list:
-    action_list action SEMICOLON { $$ = add_sibling($1, $2); }
-    | action SEMICOLON { $$ = $1; }
+if_stmt:
+    IF LPAREN condition RPAREN block {
+        ast_node *n = mk(NODE_IF); n->child = $3; n->child->sibling = $5; $$ = n;
+    }
     ;
 
-action:
-    GET IDENTIFIER {
-        insert_symbol($2, SYMBOL_TOOL, TYPE_STRING);  // Enhanced with data type
-        ast_node* get_node = new_node(NODE_ACTION, "get");
-        get_node->child = new_node(NODE_IDENTIFIER, $2);
-        $$ = get_node;
+while_stmt:
+    WHILE LPAREN condition RPAREN block {
+        ast_node *n = mk(NODE_WHILE); n->child = $3; n->child->sibling = $5; $$ = n;
     }
-    | ADD IDENTIFIER INTEGER_LITERAL G_UNIT TO IDENTIFIER {
-        insert_symbol($2, SYMBOL_INGREDIENT, TYPE_UNIT_WEIGHT);
-        validate_quantity_unit_compatibility($3, "g", $2);
+    ;
 
-        ast_node* add_node = new_node(NODE_ACTION, "add");
-        char num_str[16];
-        sprintf(num_str, "%d", $3);
-        add_node->child = new_node(NODE_IDENTIFIER, $2);
-        add_node->child->sibling = new_node(NODE_INTEGER, num_str);
-        add_node->child->sibling->sibling = new_node(NODE_UNIT, "g");
-        add_node->child->sibling->sibling->sibling = new_node(NODE_IDENTIFIER, $6);
-        $$ =add_node;
-    }
-    | ADD IDENTIFIER INTEGER_LITERAL L_UNIT TO IDENTIFIER {
-        insert_symbol($2, SYMBOL_INGREDIENT, TYPE_UNIT_VOLUME);
-        validate_quantity_unit_compatibility($3, "L", $2);
+repeat_stmt:
+      REPEAT INTEGER_LITERAL TIMES block {
+        ast_node *n = mk(NODE_REPEAT); n->child = mk_int($2);
+        n->child->sibling = $4; $$ = n;
+      }
+    | REPEAT IDENTIFIER TIMES block {
+        ast_node *n = mk(NODE_REPEAT); n->child = mk_id($2);
+        n->child->sibling = $4; $$ = n;
+      }
+    ;
 
-        ast_node* add_node = new_node(NODE_ACTION, "add");
-        char num_str[16];
-        sprintf(num_str, "%d", $3);
-        add_node->child = new_node(NODE_IDENTIFIER, $2);
-        add_node->child->sibling = new_node(NODE_INTEGER, num_str);
-        add_node->child->sibling->sibling = new_node(NODE_UNIT, "L");
-        add_node->child->sibling->sibling->sibling = new_node(NODE_IDENTIFIER, $6);
-        $$ =add_node;
-    }
-    | ADD IDENTIFIER INTEGER_LITERAL P_UNIT TO IDENTIFIER {
-        insert_symbol($2, SYMBOL_INGREDIENT, TYPE_UNIT_PIECE);
-        validate_quantity_unit_compatibility($3, "piece", $2);
+block:
+    LBRACE stmt_list RBRACE { $$ = $2; }
+    ;
 
-        ast_node* add_node = new_node(NODE_ACTION, "add");
-        char num_str[16];
-        sprintf(num_str, "%d", $3);
-        add_node->child = new_node(NODE_IDENTIFIER, $2);
-        add_node->child->sibling = new_node(NODE_INTEGER, num_str);
-        add_node->child->sibling->sibling = new_node(NODE_UNIT, "p");
-        add_node->child->sibling->sibling->sibling = new_node(NODE_IDENTIFIER, $6);
-        $$ =add_node;
-    }
-    | ADD IDENTIFIER TO IDENTIFIER {
-        insert_symbol($2, SYMBOL_INGREDIENT, TYPE_STRING);
-        ast_node* add_node = new_node(NODE_ACTION, "add");
-        add_node->child = new_node(NODE_IDENTIFIER, $2);
-        add_node->child->sibling = new_node(NODE_IDENTIFIER, $4);
-        $$ =add_node;
-    }
-    | COOK IDENTIFIER IN IDENTIFIER INTEGER_LITERAL MIN_UNIT {
-        ast_node* cook_node = new_node(NODE_ACTION, "cook");
-        char num_str[16];
-        sprintf(num_str, "%d", $5);
-        cook_node->child = new_node(NODE_IDENTIFIER, $2);
-        cook_node->child->sibling = new_node(NODE_IDENTIFIER, $4);
-        cook_node->child->sibling->sibling = new_node(NODE_INTEGER, num_str);
-        cook_node->child->sibling->sibling->sibling = new_node(NODE_UNIT, "min");
-        $$ = cook_node;
-    }
-    | RETURN IDENTIFIER {
-        ast_node* return_node = new_node(NODE_ACTION, "return");
-        return_node->child = new_node(NODE_IDENTIFIER, $2);
-        $$ = return_node;
-    }
-    | BOIL IDENTIFIER IN IDENTIFIER INTEGER_LITERAL MIN_UNIT {
-        ast_node* boil_node = new_node(NODE_ACTION, "boil");
-        char num_str[16];
-        sprintf(num_str, "%d", $5);
-        boil_node->child = new_node(NODE_IDENTIFIER, $2);
-        boil_node->child->sibling = new_node(NODE_IDENTIFIER, $4);
-        boil_node->child->sibling->sibling = new_node(NODE_INTEGER, num_str);
-        boil_node->child->sibling->sibling->sibling = new_node(NODE_UNIT, "min");
-        $$ = boil_node;
-    }
-    | DRAIN IDENTIFIER IDENTIFIER {
-        ast_node* drain_node = new_node(NODE_ACTION, "drain");
-        drain_node->child = new_node(NODE_IDENTIFIER, $2);
-        drain_node->child->sibling = new_node(NODE_IDENTIFIER, $3);
-        $$ = drain_node;
-    }
-    | MIX IDENTIFIER {
-        ast_node* mix_node = new_node(NODE_ACTION, "mix");
-        mix_node->child = new_node(NODE_IDENTIFIER, $2);
-        $$ = mix_node;
-    }
-    | SERVE IDENTIFIER {
-        ast_node* serve_node = new_node(NODE_ACTION, "serve");
-        serve_node->child = new_node(NODE_IDENTIFIER, $2);
-        $$ = serve_node;
-    }
-    | assignment
-    | if_statement
-    | while_statement
-    | repeat_statement
+/* ----- Conditions & expressions ----- */
+condition:
+      expression EQ_OP expression { $$ = mk_op(NODE_RELOP, OP_EQ, $1, $3); }
+    | expression NE_OP expression { $$ = mk_op(NODE_RELOP, OP_NE, $1, $3); }
+    | expression GT_OP expression { $$ = mk_op(NODE_RELOP, OP_GT, $1, $3); }
+    | expression LT_OP expression { $$ = mk_op(NODE_RELOP, OP_LT, $1, $3); }
+    | condition AND_OP condition  { $$ = mk_op(NODE_RELOP, OP_AND, $1, $3); }
+    | LPAREN condition RPAREN     { $$ = $2; }
+    ;
+
+expression:
+      expression ADD_OP term { $$ = mk_op(NODE_BINOP, OP_ADD, $1, $3); }
+    | expression SUB_OP term { $$ = mk_op(NODE_BINOP, OP_SUB, $1, $3); }
+    | term                   { $$ = $1; }
+    ;
+
+term:
+      term MUL_OP factor { $$ = mk_op(NODE_BINOP, OP_MUL, $1, $3); }
+    | term DIV_OP factor { $$ = mk_op(NODE_BINOP, OP_DIV, $1, $3); }
+    | factor             { $$ = $1; }
+    ;
+
+factor:
+      INTEGER_LITERAL          { $$ = mk_int($1); }
+    | FLOAT_LITERAL            { $$ = mk_float($1); }
+    | IDENTIFIER               { $$ = mk_id($1); }
+    | STRING_LITERAL           { $$ = mk_str($1); }
+    | LPAREN expression RPAREN { $$ = $2; }
+    ;
+
+number:
+      INTEGER_LITERAL { $$ = mk_int($1); }
+    | FLOAT_LITERAL   { $$ = mk_float($1); }
+    ;
+
+unit:
+      G_UNIT { $$ = mk_unit("g"); }
+    | L_UNIT { $$ = mk_unit("L"); }
+    | P_UNIT { $$ = mk_unit("p"); }
     ;
 
 %%
 
-// === AST PRINT FUNCTION FOR DEMONSTRATION ===
-void print_ast(struct ast_node* node, int level) {
-    if (!node) return;
-
-    for (int i = 0; i < level; i++) {
-        printf("  ");
-    }
-
-    const char* type_str;
-    switch(node->type) {
-        case NODE_PROGRAM:      type_str = "PROGRAM"; break;
-        case NODE_RECIPE:       type_str = "RECIPE"; break;
-        case NODE_STEP:         type_str = "STEP"; break;
-        case NODE_ACTION:       type_str = "ACTION"; break;
-        case NODE_IDENTIFIER:   type_str = "IDENTIFIER"; break;
-        case NODE_INTEGER:      type_str = "INTEGER"; break;
-        case NODE_UNIT:         type_str = "UNIT"; break;
-        case NODE_IF:           type_str = "IF"; break;
-        case NODE_ASSIGNMENT:   type_str = "ASSIGNMENT"; break;
-        case NODE_STRING:       type_str = "STRING"; break;
-        case NODE_CONDITION:    type_str = "CONDITION"; break;
-        case NODE_EXPRESSION:   type_str = "EXPRESSION"; break;
-        case NODE_WHILE:        type_str = "WHILE"; break;
-        case NODE_REPEAT:       type_str = "REPEAT"; break;
-        default:                type_str = "UNKNOWN"; break;
-    }
-
-    printf("%s", type_str);
-    if (node->value) {
-        printf(": %s", node->value);
-    }
-    printf("\n");
-
-    if (node->child) {
-        print_ast(node->child, level + 1);
-    }
-    if (node->sibling) {
-        print_ast(node->sibling, level);
-    }
-}
-
-// === MAIN FUNCTION ===
 int main(int argc, char **argv) {
     if (argc > 1) {
-        FILE *file = fopen(argv[1], "r");
-        if (!file) {
-            perror(argv[1]);
-            return 1;
-        }
-        yyin = file;
+        yyin = fopen(argv[1], "r");
+        if (!yyin) { perror(argv[1]); return 1; }
     }
 
-    // Initialize the scope stack
-    scope_stack = NULL;
+    yyparse();
 
-    int result = yyparse();
+    if (syntax_errors > 0) {
+        printf("\nCOMPILATION FAILED: %d syntax error(s).\n", syntax_errors);
+        return 1;
+    }
 
-    if (result == 0) {
-        printf("COMPILATION SUCCESSFUL!\n");
-        printf("--- AST ---\n");
-        print_ast(ast_root, 0);
-        printf("-----------\n");
+    printf("\n=== Abstract Syntax Tree ===\n");
+    print_ast(ast_root, 0);
 
-        // Check for unused symbols at end of compilation
-        check_unused_symbols();
+    printf("\n=== Semantic Analysis ===\n");
+    analyze_program(ast_root);
 
-        printf("\n ------ Recipe compiled successfully! ------ \n - No semantic errors found.\n");
-        printf("   Type checking passed for all expressions and assignments.\n");
-
+    printf("\n");
+    if (sem_errors == 0) {
+        printf("COMPILATION SUCCESSFUL: no semantic or type errors found.\n");
     } else {
-        printf("COMPILATION FAILED - Fix syntax errors and try again.\n");
+        printf("COMPILATION FAILED: %d semantic/type error(s).\n", sem_errors);
     }
 
-    // Cleanup
-    cleanup_recipe_scope();
-
-    if (yyin != stdin) {
-        fclose(yyin);
-    }
-    return result;
+    if (yyin && yyin != stdin) fclose(yyin);
+    return sem_errors == 0 ? 0 : 1;
 }
