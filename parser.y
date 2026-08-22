@@ -446,19 +446,19 @@ static void analyze_stmt(ast_node *n) {
         data_type et = type_of(expr);       /* type-checks the expression */
         value     ev = eval(expr);          /* computes a value if constant */
 
-        symbol *s = lookup(var->sval);
-        if (s && s->kind == SYM_VARIABLE) {
-            if (!compatible(s->dtype, et))
-                sem_error(n->line, "cannot assign %s to variable '%s' of type %s",
-                          type_name(et), var->sval, type_name(s->dtype));
-            s->dtype = et;
-        } else if (s) {
-            sem_error(n->line, "'%s' is a %s and cannot be assigned to",
-                      var->sval, kind_name(s->kind));
+        /* 'set' declares a variable. Re-declaring the same name in the SAME
+         * scope is an error; a 'set' in a nested block shadows instead. */
+        symbol *existing = lookup_in(scope_top, var->sval);
+        if (existing) {
+            if (existing->kind == SYM_VARIABLE)
+                sem_error(n->line, "variable '%s' is already declared in this scope",
+                          var->sval);
+            else
+                sem_error(n->line, "'%s' is a %s and cannot be assigned to",
+                          var->sval, kind_name(existing->kind));
             break;
-        } else {
-            s = insert(var->sval, SYM_VARIABLE, et);
         }
+        symbol *s = insert(var->sval, SYM_VARIABLE, et);
         /* Record the computed constant value on the symbol. */
         s->has_value = ev.known;
         if (ev.known) {
@@ -672,6 +672,7 @@ stmt:
     | if_stmt               { $$ = $1; }
     | while_stmt            { $$ = $1; }
     | repeat_stmt           { $$ = $1; }
+    | SEMICOLON             { $$ = NULL; }   /* empty statement: allows a ';' after a block */
     | error SEMICOLON       { yyerrok; $$ = NULL; }
     ;
 
