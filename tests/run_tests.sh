@@ -1,11 +1,20 @@
 #!/bin/sh
 # Compiles every example and compares the exit status with what the file is
-# supposed to do. Inside the test directories the convention is the filename:
-# anything containing "fail" must be rejected, everything else must compile.
+# supposed to do. Inside tests/ the convention is the filename: anything
+# containing "fail" must be rejected, everything else must compile.
+#
+# Run it from anywhere - it works relative to the project root.
 
-compiler=./compiler
+cd "$(dirname "$0")/.." || exit 1
+
+compiler=./build/compiler
 passed=0
 failed=0
+
+if [ ! -x "$compiler" ]; then
+    echo "$compiler not built - run 'make' first" >&2
+    exit 1
+fi
 
 run() {
     expected=$1
@@ -23,12 +32,12 @@ run() {
     fi
 }
 
-run 0 pasta_with_tomatoe_souce.txt
-run 0 pasta_extended.txt
-run 0 loop_test.txt
-run 1 type_test.txt          # deliberate type errors
+run 0 examples/pasta_with_sauce.txt
+run 0 examples/pasta_extended.txt
+run 0 examples/loop_test.txt
+run 1 examples/type_test.txt          # deliberate type errors
 
-for f in test_for_arithmetic/*.txt test_for_scope/*.txt; do
+for f in tests/arithmetic/*.txt tests/scope/*.txt; do
     case $f in
         *fail*) run 1 "$f" ;;
         *)      run 0 "$f" ;;

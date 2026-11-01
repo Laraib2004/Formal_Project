@@ -7,39 +7,56 @@ cooking recipes as a sequence of steps and actions. Built with **flex**
 ## Build & run
 
 ```sh
-make            # build the ./compiler executable
-make run        # build and run on the pasta example
-make test       # build and check every example
-./compiler <file.txt>
+make                              # build build/compiler
+make run                          # build and run on the pasta example
+make test                         # build and check every example
+make clean                        # delete build/
+
+./build/compiler <file.txt>       # compile one file
 ```
 
-`make clean` removes all generated files.
+Needs `flex`, `bison` and `gcc`. Everything generated goes to `build/`.
+
+## Layout
+
+```
+src/        recipe.l (lexer) and parser.y (grammar + semantic analysis)
+docs/       language reference, implementation notes, assignment brief
+examples/   runnable recipes
+tests/      run_tests.sh and the test cases it checks
+build/      generated; not committed
+```
 
 ## Example programs
 
-| File                             | What it shows                                   |
-|----------------------------------|-------------------------------------------------|
-| `pasta_with_tomatoe_souce.txt`   | A complete, valid recipe                         |
-| `pasta_extended.txt`             | Variables, `if` statements, comments             |
-| `loop_test.txt`                  | `repeat` and `while` loops, nested scopes        |
-| `type_test.txt`                  | Type checker: reports 4 type errors on purpose   |
-| `test_for_arithmetic/`           | Operator precedence and constant folding         |
-| `test_for_scope/`                | Scope rules: shadowing, redeclaration, lookup    |
+| File                            | What it shows                                  |
+|---------------------------------|------------------------------------------------|
+| `examples/pasta_with_sauce.txt` | A complete, valid recipe                       |
+| `examples/pasta_extended.txt`   | Variables, `if` statements, comments           |
+| `examples/loop_test.txt`        | `repeat` and `while` loops, nested scopes      |
+| `examples/type_test.txt`        | Type checker: reports 4 type errors on purpose |
+| `tests/arithmetic/`             | Operator precedence and constant folding       |
+| `tests/scope/`                  | Scope rules: shadowing, redeclaration, lookup  |
 
-`make test` runs all of them and checks each exit status. In the test
-directories a filename containing `fail` is expected to be rejected;
-every other file is expected to compile.
+`make test` runs all of them and checks each exit status. In `tests/` a filename
+containing `fail` is expected to be rejected; every other file is expected to
+compile.
 
 ## What the compiler does
 
-1. **Lexical analysis** – tokens via regular expressions (`recipe.l`).
-2. **Parsing** – an LALR grammar builds an Abstract Syntax Tree (`parser.y`).
+1. **Lexical analysis** – tokens via regular expressions (`src/recipe.l`).
+2. **Parsing** – an LALR grammar builds an Abstract Syntax Tree (`src/parser.y`).
 3. **Semantic analysis** – a single walk over the AST performs:
    - a dynamic **symbol table** with **scopes** (recipe-wide and per-block),
    - **type checking** of expressions, assignments and conditions,
    - **constant value computation** for expressions,
    - detection of undeclared / unused tools, ingredients and variables.
 
-See `DOCUMENTATION.md` for the full language description and grammar,
-and `INTERNALS.md` for how the compiler itself is built — AST, symbol
-table, scoping rules and error recovery.
+Exit status is `0` on success and `1` on any lexical, syntax or semantic error.
+
+## Documentation
+
+- [`docs/DOCUMENTATION.md`](docs/DOCUMENTATION.md) — the language: syntax, types,
+  statements, semantic rules, EBNF grammar.
+- [`docs/INTERNALS.md`](docs/INTERNALS.md) — the implementation: AST, symbol
+  table, scoping rules, type checking, error recovery.

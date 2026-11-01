@@ -15,15 +15,15 @@ The compiler is a classic front end:
 
 ```
 source text ──► [ lexer ] ──► tokens ──► [ parser ] ──► AST ──► [ analyser ] ──► report
-                recipe.l                  parser.y              parser.y
+                src/recipe.l                  src/parser.y              src/parser.y
 ```
 
-1. **Lexical analysis** (`recipe.l`, flex): regular expressions turn the input
+1. **Lexical analysis** (`src/recipe.l`, flex): regular expressions turn the input
    text into tokens. Numbers and identifiers carry an attribute (their value).
-2. **Syntax analysis** (`parser.y`, bison): an LALR(1) grammar recognises the
+2. **Syntax analysis** (`src/parser.y`, bison): an LALR(1) grammar recognises the
    structure and, as a *translation scheme*, builds an **Abstract Syntax Tree**
    (AST). The grammar actions do nothing but build the tree.
-3. **Semantic analysis** (`parser.y`): a single recursive walk over the AST does
+3. **Semantic analysis** (`src/parser.y`): a single recursive walk over the AST does
    all the semantic work exactly once — symbol table, scoping, type checking,
    value computation and unused/undeclared checks.
 
@@ -41,14 +41,15 @@ scattered between parse-time actions and a second walk.
 ## 2. How to run it
 
 ```sh
-make                       # builds ./compiler
-./compiler <recipe.txt>    # compiles one file
-make clean                 # removes generated files
+make                             # builds build/compiler
+./build/compiler <recipe.txt>    # compiles one file
+make test                        # checks every example
+make clean                       # removes build/
 ```
 
 The compiler prints the AST, a semantic-analysis trace, and a final verdict.
-It exits with status `0` on success and `1` if there are syntax or semantic
-errors.
+It exits with status `0` on success and `1` if there are lexical, syntax or
+semantic errors.
 
 ---
 
@@ -173,21 +174,21 @@ number       → INT | FLOAT
 unit         → 'g' | 'L' | 'p'
 ```
 
-The full token definitions are in `recipe.l`; the full grammar with semantic
-actions is in `parser.y`.
+The full token definitions are in `src/recipe.l`; the full grammar with semantic
+actions is in `src/parser.y`.
 
 ---
 
 ## 6. Example — input and output
 
-**Input** (`pasta_with_tomatoe_souce.txt`): a valid recipe. The compiler prints
+**Input** (`examples/pasta_with_sauce.txt`): a valid recipe. The compiler prints
 the AST, then the semantic trace, and finishes with:
 
 ```
 COMPILATION SUCCESSFUL: no semantic or type errors found.
 ```
 
-**Input** (`type_test.txt`): deliberately compares strings with integers. The
+**Input** (`examples/type_test.txt`): deliberately compares strings with integers. The
 compiler reports each type error with its line number and finishes with:
 
 ```
@@ -202,11 +203,13 @@ COMPILATION FAILED: 4 semantic/type error(s).
 
 ## 7. Files
 
-| File                           | Purpose                                    |
-|--------------------------------|--------------------------------------------|
-| `recipe.l`                     | Lexer (flex): tokens and attributes        |
-| `parser.y`                     | Grammar, AST, symbol table, semantics      |
-| `makefile`                     | Build rules                                |
-| `*.txt`                        | Example programs                           |
-| `README.md`                    | Quick start                                |
-| `DOCUMENTATION.md`             | This document                              |
+| Path                   | Purpose                                     |
+|------------------------|---------------------------------------------|
+| `src/recipe.l`         | Lexer (flex): tokens and attributes         |
+| `src/parser.y`         | Grammar, AST, symbol table, semantics       |
+| `makefile`             | Build rules                                 |
+| `examples/`            | Example programs                            |
+| `tests/`               | Test cases and the runner that checks them  |
+| `README.md`            | Quick start                                 |
+| `docs/DOCUMENTATION.md`| This document                               |
+| `docs/INTERNALS.md`    | How the compiler is implemented             |
