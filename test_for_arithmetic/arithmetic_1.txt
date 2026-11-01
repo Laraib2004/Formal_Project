@@ -2,14 +2,22 @@ recipe MyFavoritePasta {
     step 1 {
         get pot;
         add water to pot;
-        set water_temperature = 100;
+        add pasta to pot;
+        set water_temperature = 20 + 80;
+        set cooking_time = 2 * 5 - 2;
+        set servings = (4 + 2) / 2;
     }
     step 2 {
-        if (water_temperature < 90) {
+        if (water_temperature > 90) {
             boil pasta in pot 5 min;
+        };
+        repeat cooking_time times {
+            mix pot;
         };
     }
     step 3 {
-        serve MyFavoritePasta;
+        if (servings > 1) {
+            serve MyFavoritePasta;
+        };
     }
 }

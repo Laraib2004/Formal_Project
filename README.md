@@ -9,6 +9,7 @@ cooking recipes as a sequence of steps and actions. Built with **flex**
 ```sh
 make            # build the ./compiler executable
 make run        # build and run on the pasta example
+make test       # build and check every example
 ./compiler <file.txt>
 ```
 
@@ -22,6 +23,12 @@ make run        # build and run on the pasta example
 | `pasta_extended.txt`             | Variables, `if` statements, comments             |
 | `loop_test.txt`                  | `repeat` and `while` loops, nested scopes        |
 | `type_test.txt`                  | Type checker: reports 4 type errors on purpose   |
+| `test_for_arithmetic/`           | Operator precedence and constant folding         |
+| `test_for_scope/`                | Scope rules: shadowing, redeclaration, lookup    |
+
+`make test` runs all of them and checks each exit status. In the test
+directories a filename containing `fail` is expected to be rejected;
+every other file is expected to compile.
 
 ## What the compiler does
 
@@ -33,4 +40,6 @@ make run        # build and run on the pasta example
    - **constant value computation** for expressions,
    - detection of undeclared / unused tools, ingredients and variables.
 
-See `DOCUMENTATION.md` for the full language description and grammar.
+See `DOCUMENTATION.md` for the full language description and grammar,
+and `INTERNALS.md` for how the compiler itself is built — AST, symbol
+table, scoping rules and error recovery.

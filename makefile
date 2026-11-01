@@ -2,6 +2,7 @@
 #
 #   make        build the compiler
 #   make run    build and run it on the pasta example
+#   make test   build and check every example
 #   make clean  remove all generated files
 
 TARGET      = compiler
@@ -30,7 +31,10 @@ $(LEXER_C): $(FLEX_SRC) $(PARSER_H)
 run: $(TARGET)
 	./$(TARGET) pasta_with_tomatoe_souce.txt
 
+test: $(TARGET)
+	@sh run_tests.sh
+
 clean:
 	rm -f $(TARGET) $(LEXER_C) $(PARSER_C) $(PARSER_H) parser.output
 
-.PHONY: all run clean
+.PHONY: all run test clean

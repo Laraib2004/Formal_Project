@@ -33,6 +33,7 @@ int yyparse(void);
 
 int syntax_errors = 0;   /* counted by yyerror */
 int sem_errors    = 0;   /* counted by semantic analysis */
+int lex_errors    = 0;   /* counted by the lexer's catch-all rule */
 
 /* =======================================================================
  *  AST
@@ -104,6 +105,7 @@ typedef struct symbol {
     char     *name;
     sym_kind  kind;
     data_type dtype;      /* for variables            */
+    int       decl_line;
     int       used;
     /* computed constant value (for value semantics) */
     int       has_value;
@@ -168,7 +170,7 @@ static void push_scope(void) {
 static void report_unused_vars(scope *s) {
     for (symbol *e = s->symbols; e; e = e->next)
         if (e->kind == SYM_VARIABLE && !e->used)
-            sem_warn(0, "variable '%s' was set but never used", e->name);
+            sem_warn(e->decl_line, "variable '%s' was set but never used", e->name);
 }
 
 static void free_symbols(symbol *e) {
@@ -204,13 +206,14 @@ static symbol *lookup_in(scope *s, const char *name) {
 
 /* Insert a symbol. Tools and ingredients live in the recipe-wide scope so
  * they remain visible across steps; variables live in the current scope. */
-static symbol *insert(const char *name, sym_kind kind, data_type dtype) {
+static symbol *insert(const char *name, sym_kind kind, data_type dtype, int line) {
     scope *target = (kind == SYM_VARIABLE) ? scope_top : recipe_scope;
     symbol *s = calloc(1, sizeof(symbol));
-    s->name  = strdup(name);
-    s->kind  = kind;
-    s->dtype = dtype;
-    s->next  = target->symbols;
+    s->name      = strdup(name);
+    s->kind      = kind;
+    s->dtype     = dtype;
+    s->decl_line = line;
+    s->next      = target->symbols;
     target->symbols = s;
     return s;
 }
@@ -380,7 +383,7 @@ static void analyze_stmt(ast_node *n) {
         if (lookup_in(recipe_scope, tool->sval))
             sem_warn(n->line, "tool '%s' already prepared (ignoring)", tool->sval);
         else
-            insert(tool->sval, SYM_TOOL, T_UNKNOWN);
+            insert(tool->sval, SYM_TOOL, T_UNKNOWN, n->line);
         break;
     }
 
@@ -405,7 +408,7 @@ static void analyze_stmt(ast_node *n) {
         else                          c->used = 1;
         /* Declare the ingredient (once) in the recipe scope. */
         if (!lookup_in(recipe_scope, ingr->sval))
-            insert(ingr->sval, SYM_INGREDIENT, T_UNKNOWN);
+            insert(ingr->sval, SYM_INGREDIENT, T_UNKNOWN, n->line);
         break;
     }
 
@@ -458,7 +461,7 @@ static void analyze_stmt(ast_node *n) {
                           var->sval, kind_name(existing->kind));
             break;
         }
-        symbol *s = insert(var->sval, SYM_VARIABLE, et);
+        symbol *s = insert(var->sval, SYM_VARIABLE, et, n->line);
         /* Record the computed constant value on the symbol. */
         s->has_value = ev.known;
         if (ev.known) {
@@ -533,7 +536,8 @@ static void analyze_recipe(ast_node *recipe) {
     int any = 0;
     for (symbol *e = recipe_scope->symbols; e; e = e->next)
         if (!e->used) {
-            sem_warn(0, "%s '%s' was prepared but never used", kind_name(e->kind), e->name);
+            sem_warn(e->decl_line, "%s '%s' was prepared but never used",
+                     kind_name(e->kind), e->name);
             any = 1;
         }
     if (!any) printf("All tools and ingredients were used.\n");
@@ -836,6 +840,10 @@ int main(int argc, char **argv) {
 
     if (syntax_errors > 0) {
         printf("\nCOMPILATION FAILED: %d syntax error(s).\n", syntax_errors);
+        return 1;
+    }
+    if (lex_errors > 0) {
+        printf("\nCOMPILATION FAILED: %d lexical error(s).\n", lex_errors);
         return 1;
     }
 

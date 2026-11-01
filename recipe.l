@@ -15,6 +15,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include "parser.tab.h"
+
+extern int lex_errors;
 %}
 
 %%
@@ -95,6 +97,9 @@
 "//"[^\n]*      { /* single-line comment: ignored */ }
 [ \t\r\n]+      { /* whitespace: ignored */ }
 
-.               { fprintf(stderr, "Lexical error (line %d): stray character '%c'\n", yylineno, *yytext); }
+. {
+    fprintf(stderr, "Lexical error (line %d): stray character '%c'\n", yylineno, *yytext);
+    lex_errors++;
+}
 
 %%
