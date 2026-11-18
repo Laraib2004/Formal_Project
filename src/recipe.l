@@ -4,12 +4,7 @@
 
 %{
 /*
- * recipe.l - Lexical analyser for the "Recipe" language.
- *
- * Each token is recognised with a regular expression and, where it carries
- * information (numbers, identifiers, strings), the corresponding attribute is
- * placed in yylval for the parser. The numeric conversion done here (atoi/atof)
- * is the ONLY place text becomes a value - the parser keeps that value as-is.
+ * recipe.l - Lexical analyser for the block-structured "Recipe" language.
  */
 #include <stdio.h>
 #include <string.h>
@@ -21,25 +16,15 @@ extern int lex_errors;
 
 %%
 
-    /* ---- Keywords: recipe structure ---- */
+    /* ---- Keywords: Globals & Structure ---- */
+"ingredients"   { return INGREDIENTS; }
+"tools"         { return TOOLS; }
 "recipe"        { return RECIPE; }
-"step"          { return STEP; }
 
-    /* ---- Keywords: cooking actions ---- */
-"get"           { return GET; }
-"add"           { return ADD; }
-"to"            { return TO; }
-"cook"          { return COOK; }
-"in"            { return IN; }
+    /* ---- Keywords: Built-ins & Control Flow ---- */
+"retrieve"      { return RETRIEVE; }
 "return"        { return RETURN; }
-"boil"          { return BOIL; }
-"drain"         { return DRAIN; }
-"mix"           { return MIX; }
-"serve"         { return SERVE; }
-
-    /* ---- Keywords: control flow / variables ---- */
 "if"            { return IF; }
-"set"           { return SET; }
 "while"         { return WHILE; }
 "repeat"        { return REPEAT; }
 "times"         { return TIMES; }
@@ -50,14 +35,18 @@ extern int lex_errors;
 "p"             { return P_UNIT; }
 "min"           { return MIN_UNIT; }
 
-    /* ---- Punctuation ---- */
+    /* ---- Punctuation & Brackets ---- */
 "{"             { return LBRACE; }
 "}"             { return RBRACE; }
+"["             { return LBRACKET; }
+"]"             { return RBRACKET; }
 ";"             { return SEMICOLON; }
+","             { return COMMA; }
 "("             { return LPAREN; }
 ")"             { return RPAREN; }
 
-    /* ---- Operators (multi-char before single-char) ---- */
+    /* ---- Operators ---- */
+"+="            { return PLUS_ASSIGN; }
 "=="            { return EQ_OP; }
 "!="            { return NE_OP; }
 "&&"            { return AND_OP; }
@@ -70,8 +59,6 @@ extern int lex_errors;
 "/"             { return DIV_OP; }
 
     /* ---- Literals ---- */
-    /* Float must carry a dot with digits on both sides so it never steals
-       a plain integer. atof performs the text->value conversion once. */
 [0-9]+"."[0-9]+ {
     yylval.double_val = atof(yytext);
     return FLOAT_LITERAL;
@@ -83,7 +70,6 @@ extern int lex_errors;
 }
 
 \"[^\"]*\" {
-    /* Copy the string including quotes; the parser strips them if needed. */
     yylval.string_val = strdup(yytext);
     return STRING_LITERAL;
 }
